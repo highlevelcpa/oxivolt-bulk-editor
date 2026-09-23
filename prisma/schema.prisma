@@ -1,0 +1,49 @@
+generator client {
+    provider = "prisma-client-js"
+    binaryTargets = ["native", "linux-musl-arm64-openssl-3.0.x"]
+    output = "/home/ubuntu/oxivolt_bulk_editor/nextjs_space/node_modules/.prisma/client"
+}
+
+datasource db {
+    provider = "postgresql"
+    url      = env("DATABASE_URL")
+}
+
+// Stores the offline access token per Shopify shop after OAuth install.
+model ShopSession {
+  id             String    @id @default(cuid())
+  shop           String    @unique
+  accessToken    String
+  scope          String?
+  tokenExpiresAt DateTime?
+  installedAt    DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+}
+
+// Audit log of bulk edit operations for the merchant to review.
+model EditLog {
+  id          String   @id @default(cuid())
+  shop        String
+  productId   String
+  productTitle String?
+  changes     String   // JSON string describing applied changes
+  previousValues String? // JSON snapshot of values BEFORE the edit (for Undo)
+  undone      Boolean  @default(false)
+  undoneAt    DateTime?
+  success     Boolean  @default(true)
+  errorMsg    String?
+  createdAt   DateTime @default(now())
+
+  @@index([shop, createdAt])
+}
+
+// Counts how many products were processed per shop per calendar month (UTC).
+model UsageCounter {
+  id        String   @id @default(cuid())
+  shop      String
+  period    String   // "YYYY-MM" (UTC)
+  count     Int      @default(0)
+  updatedAt DateTime @updatedAt
+
+  @@unique([shop, period])
+}

@@ -1,0 +1,13 @@
+# ===== OXIVOLT Bulk Editor — Environment Variables =====
+
+# Shopify App Credentials (from partners.shopify.com → your app → API credentials)
+SHOPIFY_API_KEY=<your_shopify_client_id>
+SHOPIFY_API_SECRET=<your_shopify_client_secret>
+SHOPIFY_SCOPES=read_products,write_products,read_inventory,write_inventory,read_locations
+
+# PostgreSQL Database URL
+# Example: postgresql://user:password@host:5432/dbname
+DATABASE_URL=<your_postgresql_connection_string>
+
+# Abacus AI API Key (for AI-powered editing features)
+ABACUSAI_API_KEY=<your_abacusai_api_key>
