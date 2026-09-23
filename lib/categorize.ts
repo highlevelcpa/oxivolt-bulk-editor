@@ -1,6 +1,8 @@
-// Uses the vision-capable LLM to classify a product into a concise, standard
-// retail category search term based on its image, title, type and description.
+// Uses Google Gemini (vision-capable) to classify a product into a concise,
+// standard retail category search term based on its image, title, type and description.
 // Robust: logs failures, retries text-only, and falls back to a second model.
+
+import { geminiGenerate, getGeminiKey, GEMINI_PRIMARY, GEMINI_FALLBACK } from './gemini';
 
 export type ProductForCategorize = {
   id: string;
@@ -63,40 +65,8 @@ async function callLlm(
   instructions: string,
   imageUrl?: string | null,
 ): Promise<Classification | null> {
-  const content: any[] = [{ type: 'text', text: instructions }];
-  if (imageUrl) {
-    content.push({ type: 'image_url', image_url: { url: imageUrl } });
-  }
-
-  let resp: Response;
-  try {
-    resp = await fetch('https://apps.abacus.ai/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({
-        model,
-        messages: [{ role: 'user', content }],
-        max_tokens: 600,
-        temperature: 0.1,
-        response_format: { type: 'json_object' },
-      }),
-    });
-  } catch (e: any) {
-    console.error(`[categorize] fetch error model=${model} image=${!!imageUrl}:`, e?.message ?? e);
-    return null;
-  }
-
-  if (!resp.ok) {
-    const t = await resp.text().catch(() => '');
-    console.error(`[categorize] LLM ${resp.status} model=${model} image=${!!imageUrl}: ${t.slice(0, 300)}`);
-    return null;
-  }
-
-  const json: any = await resp.json().catch(() => null);
-  const raw: string = json?.choices?.[0]?.message?.content ?? '';
+  const raw = await geminiGenerate(apiKey, model, instructions, imageUrl, 600, 0.1, 'categorize');
+  if (raw == null) return null;
   const parsed = parseClassification(raw);
   if (!parsed) {
     console.error(
@@ -109,8 +79,8 @@ async function callLlm(
 export async function classifyProductCategory(
   p: ProductForCategorize,
 ): Promise<Classification | null> {
-  const apiKey = process.env.ABACUSAI_API_KEY;
-  if (!apiKey) throw new Error('LLM API key is not configured on the server');
+  const apiKey = getGeminiKey();
+  if (!apiKey) throw new Error('GEMINI_API_KEY is not configured on the server');
 
   const desc = stripHtml(p.description).slice(0, 600);
   const textInfo =
@@ -130,17 +100,17 @@ export async function classifyProductCategory(
     `\n\n${textInfo}`;
 
   // Attempt 1: primary model WITH image (if any).
-  let result = await callLlm(apiKey, 'gemini-3.8-flash', instructions, p.imageUrl);
+  let result = await callLlm(apiKey, GEMINI_PRIMARY, instructions, p.imageUrl);
   if (result) return result;
 
   // Attempt 2: primary model TEXT-ONLY (image may be inaccessible/too large).
   if (p.imageUrl) {
-    result = await callLlm(apiKey, 'gemini-3.8-flash', instructions, null);
+    result = await callLlm(apiKey, GEMINI_PRIMARY, instructions, null);
     if (result) return result;
   }
 
   // Attempt 3: fallback model TEXT-ONLY.
-  result = await callLlm(apiKey, 'gpt-5.4-mini', instructions, null);
+  result = await callLlm(apiKey, GEMINI_FALLBACK, instructions, null);
   if (result) return result;
 
   console.error(`[categorize] all attempts failed for product ${p.id} "${p.title}"`);
