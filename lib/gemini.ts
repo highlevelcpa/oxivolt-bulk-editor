@@ -1,15 +1,16 @@
 // Google Gemini (Generative Language API) client.
 // Free-tier friendly: uses GEMINI_API_KEY (or GOOGLE_API_KEY) and the
-// gemini-2.0-flash / gemini-1.5-flash models. Supports optional product images
-// by fetching them and inlining as base64 (Gemini does not accept image URLs).
+// gemini-3.6-flash / gemini-3.5-flash-lite models. Supports optional product
+// images by fetching them and inlining as base64 (Gemini does not accept image
+// URLs). Thinking is disabled so the whole token budget goes to the answer.
 
 export function getGeminiKey(): string | null {
   return process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || null;
 }
 
 // Primary (vision-capable) then fallback model.
-export const GEMINI_PRIMARY = 'gemini-2.0-flash';
-export const GEMINI_FALLBACK = 'gemini-1.5-flash';
+export const GEMINI_PRIMARY = 'gemini-3.6-flash';
+export const GEMINI_FALLBACK = 'gemini-3.5-flash-lite';
 
 type InlineImage = { mime_type: string; data: string };
 
@@ -58,6 +59,9 @@ export async function geminiGenerate(
           temperature,
           maxOutputTokens: maxTokens,
           responseMimeType: 'application/json',
+          // Gemini 3.x are thinking models: without this the reasoning eats the
+          // token budget and the JSON answer comes back empty/truncated.
+          thinkingConfig: { thinkingBudget: 0 },
         },
       }),
     });
