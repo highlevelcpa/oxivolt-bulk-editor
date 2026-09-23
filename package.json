@@ -126,5 +126,6 @@
   "resolutions": {
     "motion-dom": "12.23.12",
     "motion-utils": "12.23.6"
-  }
+  },
+  "packageManager": "yarn@4.9.1"
 }

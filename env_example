@@ -1,13 +1,13 @@
-# ===== OXIVOLT Bulk Editor — Environment Variables =====
+# ===== OXIVOLT Bulk Editor — Environment Variables (Railway) =====
 
-# Shopify App Credentials (from partners.shopify.com → your app → API credentials)
+# Shopify App Credentials (partners.shopify.com -> your app -> Client credentials)
 SHOPIFY_API_KEY=<your_shopify_client_id>
 SHOPIFY_API_SECRET=<your_shopify_client_secret>
 SHOPIFY_SCOPES=read_products,write_products,read_inventory,write_inventory,read_locations
 
-# PostgreSQL Database URL
-# Example: postgresql://user:password@host:5432/dbname
+# PostgreSQL connection string (Railway injects this automatically if you add a
+# Postgres plugin and reference it — otherwise paste your DB URL here)
 DATABASE_URL=<your_postgresql_connection_string>
 
-# Abacus AI API Key (for AI-powered editing features)
+# Abacus AI API key (powers the AI editing features)
 ABACUSAI_API_KEY=<your_abacusai_api_key>
