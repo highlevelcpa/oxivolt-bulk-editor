@@ -259,17 +259,22 @@ export async function generateAllContent(p: ProductForEnhance): Promise<AllConte
     `{"title":"...","html":"...","seoTitle":"...","seoDescription":"...","handle":"...","tags":["...","..."]}.` +
     `\n\n${info}`;
 
-  let raw = await callLlmRaw(apiKey, GEMINI_PRIMARY, instructions, p.imageUrl, 1500);
+  let raw = await callLlmRaw(apiKey, GEMINI_PRIMARY, instructions, p.imageUrl, 2200);
   let parsed = parseJsonLoose(raw || '');
   if (!parsed && p.imageUrl) {
-    raw = await callLlmRaw(apiKey, GEMINI_PRIMARY, instructions, null, 1500);
+    raw = await callLlmRaw(apiKey, GEMINI_PRIMARY, instructions, null, 2200);
     parsed = parseJsonLoose(raw || '');
   }
   if (!parsed) {
-    raw = await callLlmRaw(apiKey, GEMINI_FALLBACK, instructions, null, 1500);
+    raw = await callLlmRaw(apiKey, GEMINI_FALLBACK, instructions, null, 2200);
     parsed = parseJsonLoose(raw || '');
   }
-  if (!parsed) return null;
+  if (!parsed) {
+    console.error(
+      `[enhance] generateAllContent parse failed rawLen=${(raw || '').length} head=${(raw || '').slice(0, 120)}`,
+    );
+    return null;
+  }
 
   const title =
     (parsed?.title || parsed?.name || '').toString().trim().replace(/^["']|["']$/g, '').slice(0, 120) || null;

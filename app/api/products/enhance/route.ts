@@ -108,7 +108,20 @@ export async function POST(req: NextRequest) {
         let previous: any = {};
 
         if (mode === 'all') {
-          const content = await generateAllContent(p);
+          // Fast path: one combined AI call for title+description+SEO+tags.
+          let content = await generateAllContent(p);
+          // Reliable fallback: if the combined call could not be parsed, run the
+          // proven individual generators sequentially (bounded concurrency, so we
+          // never burst the AI rate limit) and merge the results.
+          if (!content) {
+            const fTitle = await generateTitle(p);
+            const fDesc = await generateDescription(p);
+            const fSeo = await generateSeo(p);
+            const fTags = await generateTags(p);
+            if (fTitle || fDesc || fSeo || (fTags && fTags.length > 0)) {
+              content = { title: fTitle, descriptionHtml: fDesc, seo: fSeo, tags: fTags };
+            }
+          }
           if (!content) {
             return { id: n.id, title: n.title, success: false, error: 'Could not generate content' };
           }
