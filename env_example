@@ -11,4 +11,20 @@ DATABASE_URL=<your_postgresql_connection_string>
 
 # Google Gemini API key (powers the AI editing features) — FREE tier
 # Get one at https://aistudio.google.com/apikey
+#
+# MULTI-KEY FAILOVER: add several keys to keep the AI working after one key
+# hits its free-tier daily/minute limit. The app tries them in order and
+# automatically switches to the next key on quota/rate-limit errors.
+# Two ways (you can mix them):
+#   1) Comma-separated in this one variable:
+#        GEMINI_API_KEY=key1,key2,key3
+#   2) Numbered extra variables (GEMINI_API_KEY_2 ... up to _10):
+#        GEMINI_API_KEY=key1
+#        GEMINI_API_KEY_2=key2
+#        GEMINI_API_KEY_3=key3
 GEMINI_API_KEY=<your_gemini_api_key>
+
+# Abacus.AI RouteLLM key (OPTIONAL) — used as a final fallback for the AI
+# features when every Gemini key above is exhausted. Get one at
+# https://apps.abacus.ai/ -> API Keys.
+ABACUS_API_KEY=<your_abacus_api_key>
