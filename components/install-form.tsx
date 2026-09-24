@@ -4,7 +4,7 @@ import { useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card } from '@/components/ui/card';
-import { Zap, Store, Tag, Boxes, ShieldCheck, ArrowRight } from 'lucide-react';
+import { Zap, Store, Tag, Boxes, ShieldCheck, ArrowRight, Sparkles, FolderTree, RotateCcw, Wand2 } from 'lucide-react';
 
 function normalizeShop(raw: string): string | null {
   let s = (raw ?? '').trim().toLowerCase();
@@ -31,9 +31,13 @@ export default function InstallForm() {
   };
 
   const features = [
+    { icon: Wand2, title: 'Run all with AI', desc: 'Generate title, description, SEO, tags and category for many products in one click.' },
+    { icon: Sparkles, title: 'AI content', desc: 'Write titles, descriptions, SEO meta tags and product tags automatically.' },
+    { icon: FolderTree, title: 'Smart category', desc: 'Let AI set the right Shopify product category for each item.' },
     { icon: Store, title: 'Bulk vendor', desc: 'Set one vendor name across every selected product.' },
     { icon: Tag, title: 'Bulk pricing', desc: 'Multiply existing prices or set one fixed price.' },
     { icon: Boxes, title: 'Bulk inventory', desc: 'Push a single stock quantity to all products.' },
+    { icon: RotateCcw, title: 'One-click restore', desc: 'Revert any product back to its original state after edits.' },
   ];
 
   return (
@@ -49,9 +53,9 @@ export default function InstallForm() {
         <h1 className="max-w-2xl text-center font-display text-4xl font-bold tracking-tight sm:text-5xl">
           Edit <span className="text-primary">hundreds</span> of products at once
         </h1>
-        <p className="mt-4 max-w-xl text-center text-base text-muted-foreground">
-          Update vendor, price and inventory across your entire Shopify catalog in seconds — no
-          spreadsheets, no manual edits.
+        <p className="mt-4 max-w-2xl text-center text-base text-muted-foreground">
+          Update vendor, price and inventory in bulk — or let AI generate titles, descriptions, SEO
+          meta tags, product tags and categories. Preview, apply in one click, and restore anytime.
         </p>
 
         <Card className="mt-10 w-full max-w-md p-6 shadow-lg">
@@ -76,7 +80,7 @@ export default function InstallForm() {
           </p>
         </Card>
 
-        <div className="mt-12 grid w-full max-w-3xl grid-cols-1 gap-4 sm:grid-cols-3">
+        <div className="mt-12 grid w-full max-w-4xl grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {features.map((f) => {
             const Icon = f.icon;
             return (

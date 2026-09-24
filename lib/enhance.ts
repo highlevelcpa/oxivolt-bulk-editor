@@ -223,3 +223,82 @@ export async function generateSeo(
   if (!title && !description && !handle) return null;
   return { title, description, handle };
 }
+
+// Combined generator: produces title + description + SEO + tags in a SINGLE
+// Gemini call. Used by "Run all with AI" so each product needs one AI request
+// for all content (instead of four), which is much faster and uses far less of
+// the API quota. Returns null only if nothing usable could be parsed.
+export type AllContent = {
+  title: string | null;
+  descriptionHtml: string | null;
+  seo: { title: string; description: string; handle: string } | null;
+  tags: string[] | null;
+};
+
+export async function generateAllContent(p: ProductForEnhance): Promise<AllContent | null> {
+  const apiKey = getGeminiKey();
+  if (!apiKey) throw new Error('GEMINI_API_KEY is not configured on the server');
+
+  const desc = stripHtml(p.description).slice(0, 700);
+  const info =
+    `Current title: ${p.title || 'N/A'}\n` +
+    `Vendor: ${p.vendor || 'N/A'}\n` +
+    `Type: ${p.productType || 'N/A'}\n` +
+    `Category: ${p.category || 'N/A'}\n` +
+    `Existing description: ${desc || 'N/A'}`;
+
+  const instructions =
+    `You are an expert e-commerce copywriter and SEO specialist. For the product below, generate ALL of the following in one response, using the product image if provided. Never mention any monetary amount and do not invent specs you cannot see.\n` +
+    `1) title: an improved product title, at most 70 characters, Title Case, no ALL CAPS, no emojis, no quotation marks, no vendor/brand name unless essential.\n` +
+    `2) html: a compelling product description, 60-120 words, as clean HTML using ONLY <p>, <ul>, <li> and <strong> tags (one short paragraph plus a 3-4 item bullet list).\n` +
+    `3) seoTitle: a meta title at most 60 characters including the product name and a key attribute.\n` +
+    `4) seoDescription: a meta description at most 155 characters, compelling and keyword-rich.\n` +
+    `5) handle: a short keyword-rich URL slug, lowercase, hyphen-separated, only letters/numbers/hyphens, at most 60 characters.\n` +
+    `6) tags: 5-8 concise tags, each 1-3 words, lowercase, no duplicates, focused on attributes/materials/use cases/style/audience; do NOT include the vendor/brand name.\n` +
+    `Respond with raw JSON only, no markdown, in this exact shape: ` +
+    `{"title":"...","html":"...","seoTitle":"...","seoDescription":"...","handle":"...","tags":["...","..."]}.` +
+    `\n\n${info}`;
+
+  let raw = await callLlmRaw(apiKey, GEMINI_PRIMARY, instructions, p.imageUrl, 1500);
+  let parsed = parseJsonLoose(raw || '');
+  if (!parsed && p.imageUrl) {
+    raw = await callLlmRaw(apiKey, GEMINI_PRIMARY, instructions, null, 1500);
+    parsed = parseJsonLoose(raw || '');
+  }
+  if (!parsed) {
+    raw = await callLlmRaw(apiKey, GEMINI_FALLBACK, instructions, null, 1500);
+    parsed = parseJsonLoose(raw || '');
+  }
+  if (!parsed) return null;
+
+  const title =
+    (parsed?.title || parsed?.name || '').toString().trim().replace(/^["']|["']$/g, '').slice(0, 120) || null;
+  const descriptionHtml = (parsed?.html || parsed?.description || '').toString().trim() || null;
+
+  const seoTitle = (parsed?.seoTitle || parsed?.seo_title || '').toString().trim().slice(0, 70);
+  const seoDescription = (parsed?.seoDescription || parsed?.seo_description || '').toString().trim().slice(0, 320);
+  const handle = slugify((parsed?.handle || seoTitle || title || p.title || '').toString());
+  const seo = seoTitle || seoDescription || handle ? { title: seoTitle, description: seoDescription, handle } : null;
+
+  let list: any = parsed?.tags ?? parsed?.Tags ?? null;
+  if (typeof list === 'string') list = list.split(',');
+  let tags: string[] | null = null;
+  if (Array.isArray(list)) {
+    const clean = list
+      .map((t: any) => (t == null ? '' : String(t).trim()))
+      .filter((t: string) => t.length > 0 && t.length <= 40);
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const t of clean) {
+      const k = t.toLowerCase();
+      if (!seen.has(k)) {
+        seen.add(k);
+        out.push(t);
+      }
+    }
+    tags = out.length > 0 ? out.slice(0, 12) : null;
+  }
+
+  if (!title && !descriptionHtml && !seo && !tags) return null;
+  return { title, descriptionHtml, seo, tags };
+}

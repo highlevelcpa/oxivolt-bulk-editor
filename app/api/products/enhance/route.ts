@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getBearerToken, verifySessionToken, shopifyGraphQL } from '@/lib/shopify';
 import { getWorkingAccessToken, ReauthRequiredError } from '@/lib/access-token';
 import { getPlanInfo } from '@/lib/billing';
-import { generateDescription, generateSeo, generateTags, generateTitle } from '@/lib/enhance';
+import { generateDescription, generateSeo, generateTags, generateTitle, generateAllContent } from '@/lib/enhance';
 import { prisma } from '@/lib/db';
 import { incrementUsage } from '@/lib/usage';
 
@@ -48,14 +48,16 @@ export async function POST(req: NextRequest) {
     const productIds: string[] = Array.isArray(body?.productIds)
       ? body.productIds.filter((x: any) => typeof x === 'string')
       : [];
-    const mode: 'description' | 'seo' | 'tags' | 'title' =
+    const mode: 'description' | 'seo' | 'tags' | 'title' | 'all' =
       body?.mode === 'seo'
         ? 'seo'
         : body?.mode === 'tags'
           ? 'tags'
           : body?.mode === 'title'
             ? 'title'
-            : 'description';
+            : body?.mode === 'all'
+              ? 'all'
+              : 'description';
     if (productIds.length === 0) {
       return NextResponse.json({ error: 'No products provided' }, { status: 400 });
     }
@@ -88,8 +90,8 @@ export async function POST(req: NextRequest) {
     const nodes: any[] = nodesData?.nodes ?? [];
     const results: any[] = [];
 
-    for (const n of nodes) {
-      if (!n?.id) continue;
+    async function processNode(n: any): Promise<any> {
+      if (!n?.id) return null;
       try {
         const p = {
           id: n.id,
@@ -105,11 +107,47 @@ export async function POST(req: NextRequest) {
         let changes: any = {};
         let previous: any = {};
 
-        if (mode === 'title') {
+        if (mode === 'all') {
+          const content = await generateAllContent(p);
+          if (!content) {
+            return { id: n.id, title: n.title, success: false, error: 'Could not generate content' };
+          }
+          const existing: string[] = Array.isArray(n?.tags) ? n.tags : [];
+          const seen = new Set(existing.map((t: string) => String(t).toLowerCase()));
+          const added: string[] = [];
+          for (const t of (content.tags || [])) {
+            const k = t.toLowerCase();
+            if (!seen.has(k)) {
+              seen.add(k);
+              added.push(t);
+            }
+          }
+          if (content.title) productInput.title = content.title;
+          if (content.descriptionHtml) productInput.descriptionHtml = content.descriptionHtml;
+          if (content.seo) {
+            productInput.seo = { title: content.seo.title, description: content.seo.description };
+            if (content.seo.handle) productInput.handle = content.seo.handle;
+          }
+          if (added.length > 0) productInput.tags = [...existing, ...added];
+          changes = {
+            title: content.title || '(unchanged)',
+            description: content.descriptionHtml ? 'AI generated' : '(unchanged)',
+            seoTitle: content.seo?.title || '(unchanged)',
+            seoDescription: content.seo?.description || '(unchanged)',
+            urlHandle: content.seo?.handle || '(unchanged)',
+            tagsAdded: added.length > 0 ? added.join(', ') : '(none)',
+          };
+          previous = {
+            title: n.title ?? null,
+            descriptionHtml: n?.descriptionHtml ?? '',
+            seo: { title: n?.seo?.title ?? null, description: n?.seo?.description ?? null },
+            handle: n?.handle ?? null,
+            tags: existing,
+          };
+        } else if (mode === 'title') {
           const newTitle = await generateTitle(p);
           if (!newTitle) {
-            results.push({ id: n.id, title: n.title, success: false, error: 'Could not generate title' });
-            continue;
+            return { id: n.id, title: n.title, success: false, error: 'Could not generate title' };
           }
           productInput.title = newTitle;
           changes = { title: newTitle };
@@ -117,8 +155,7 @@ export async function POST(req: NextRequest) {
         } else if (mode === 'seo') {
           const seo = await generateSeo(p);
           if (!seo) {
-            results.push({ id: n.id, title: n.title, success: false, error: 'Could not generate SEO' });
-            continue;
+            return { id: n.id, title: n.title, success: false, error: 'Could not generate SEO' };
           }
           productInput.seo = { title: seo.title, description: seo.description };
           if (seo.handle) productInput.handle = seo.handle;
@@ -130,8 +167,7 @@ export async function POST(req: NextRequest) {
         } else if (mode === 'tags') {
           const aiTags = await generateTags(p);
           if (!aiTags || aiTags.length === 0) {
-            results.push({ id: n.id, title: n.title, success: false, error: 'Could not generate tags' });
-            continue;
+            return { id: n.id, title: n.title, success: false, error: 'Could not generate tags' };
           }
           const existing: string[] = Array.isArray(n?.tags) ? n.tags : [];
           const seen = new Set(existing.map((t: string) => String(t).toLowerCase()));
@@ -144,8 +180,7 @@ export async function POST(req: NextRequest) {
             }
           }
           if (added.length === 0) {
-            results.push({ id: n.id, title: n.title, success: true, note: 'No new tags' });
-            continue;
+            return { id: n.id, title: n.title, success: true, note: 'No new tags' };
           }
           productInput.tags = [...existing, ...added];
           changes = { tagsAdded: added.join(', ') };
@@ -153,27 +188,24 @@ export async function POST(req: NextRequest) {
         } else {
           const html = await generateDescription(p);
           if (!html) {
-            results.push({ id: n.id, title: n.title, success: false, error: 'Could not generate description' });
-            continue;
+            return { id: n.id, title: n.title, success: false, error: 'Could not generate description' };
           }
           productInput.descriptionHtml = html;
           changes = { description: 'AI generated' };
           previous = { descriptionHtml: n?.descriptionHtml ?? '' };
         }
 
-        const upd: any = await shopifyGraphQL(shop, accessToken, PRODUCT_UPDATE, { product: productInput });
+        const upd: any = await shopifyGraphQL(shop!, accessToken!, PRODUCT_UPDATE, { product: productInput });
         const errs = upd?.productUpdate?.userErrors ?? [];
         if (Array.isArray(errs) && errs.length > 0) {
           const msg = errs.map((e: any) => e?.message).filter(Boolean).join('; ');
-          results.push({ id: n.id, title: n.title, success: false, error: msg || 'Update rejected' });
-          continue;
+          return { id: n.id, title: n.title, success: false, error: msg || 'Update rejected' };
         }
 
-        results.push({ id: n.id, title: n.title, success: true });
         await prisma.editLog
           .create({
             data: {
-              shop,
+              shop: shop!,
               productId: n.id,
               productTitle: n.title ?? null,
               changes: JSON.stringify(changes),
@@ -183,9 +215,16 @@ export async function POST(req: NextRequest) {
             },
           })
           .catch(() => null);
+
+        return { id: n.id, title: n.title, success: true };
       } catch (e: any) {
-        results.push({ id: n.id, title: n.title, success: false, error: e?.message ?? 'Failed to enhance' });
+        return { id: n.id, title: n.title, success: false, error: e?.message ?? 'Failed to enhance' };
       }
+    }
+
+    const settled = await Promise.all(nodes.map((n) => processNode(n)));
+    for (const r of settled) {
+      if (r) results.push(r);
     }
 
     const successCount = results.filter((r) => r?.success).length;

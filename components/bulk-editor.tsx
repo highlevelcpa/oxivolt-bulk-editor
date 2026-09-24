@@ -594,10 +594,7 @@ export default function BulkEditor({ shop, host }: { shop: string; host: string 
     }
 
     const steps: { endpoint: string; label: string; body: (chunk: string[]) => any }[] = [
-      { endpoint: '/api/products/enhance', label: 'titles', body: (c) => ({ productIds: c, mode: 'title' }) },
-      { endpoint: '/api/products/enhance', label: 'descriptions', body: (c) => ({ productIds: c, mode: 'description' }) },
-      { endpoint: '/api/products/enhance', label: 'SEO meta tags', body: (c) => ({ productIds: c, mode: 'seo' }) },
-      { endpoint: '/api/products/enhance', label: 'tags', body: (c) => ({ productIds: c, mode: 'tags' }) },
+      { endpoint: '/api/products/enhance', label: 'content', body: (c) => ({ productIds: c, mode: 'all' }) },
       { endpoint: '/api/products/categorize', label: 'category', body: (c) => ({ productIds: c }) },
     ];
 
@@ -822,7 +819,7 @@ export default function BulkEditor({ shop, host }: { shop: string; host: string 
           </div>
         </div>
 
-        <div className="grid grid-cols-1 gap-6 lg:grid-cols-[1fr_340px]">
+        <div className="grid grid-cols-1 items-start gap-6 lg:grid-cols-[1fr_340px]">
           {/* Products table */}
           <Card className="overflow-hidden p-0 shadow-sm">
             {/* Search + filter banner */}
