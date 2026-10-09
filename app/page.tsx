@@ -1,6 +1,7 @@
 import { isValidShop } from '@/lib/shopify';
 import BulkEditor from '@/components/bulk-editor';
 import InstallForm from '@/components/install-form';
+import AppNav from '@/components/app-nav';
 
 export const dynamic = 'force-dynamic';
 
@@ -30,5 +31,10 @@ export default async function Home({
   // (see lib/access-token.ts). If the merchant genuinely needs to (re)authorize
   // (e.g. new scopes), the API returns 401 reauth_required and the client
   // breaks out to /api/auth as a fallback.
-  return <BulkEditor shop={shopParam} host={hostParam} />;
+  return (
+    <>
+      <AppNav shop={shopParam} host={hostParam} />
+      <BulkEditor shop={shopParam} host={hostParam} />
+    </>
+  );
 }
