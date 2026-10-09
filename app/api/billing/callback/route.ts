@@ -57,5 +57,7 @@ export async function GET(req: NextRequest) {
     .catch(() => null);
 
   console.log('[billing] callback', shop, 'charge_id=', chargeId, 'status=', status, 'result=', result);
-  return NextResponse.redirect(`https://${shop}/admin/apps/${API_KEY}?billing=${result}`);
+  // Only whitelisted in-app paths are allowed as a return target.
+  const path = sp.get('return') === 'manage-plan' ? '/manage-plan' : '';
+  return NextResponse.redirect(`https://${shop}/admin/apps/${API_KEY}${path}?billing=${result}`);
 }
