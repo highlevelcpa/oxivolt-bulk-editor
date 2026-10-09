@@ -364,8 +364,21 @@ export function verifyShopSignature(shop: string, sig: string | null | undefined
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
-export function buildReturnUrl(appUrl: string, shop: string, planKey: PaidPlanKey): string {
+// Pages the billing callback may send the merchant back to after approval.
+export type BillingReturnTo = 'editor' | 'manage-plan';
+
+export function isBillingReturnTo(v: unknown): v is BillingReturnTo {
+  return v === 'editor' || v === 'manage-plan';
+}
+
+export function buildReturnUrl(
+  appUrl: string,
+  shop: string,
+  planKey: PaidPlanKey,
+  returnTo: BillingReturnTo = 'editor',
+): string {
   const qs = new URLSearchParams({ shop, plan: planKey, sig: signShop(shop) });
+  if (returnTo !== 'editor') qs.set('return', returnTo);
   return `${appUrl}/api/billing/callback?${qs.toString()}`;
 }
 
@@ -391,13 +404,14 @@ export async function createSubscription(
   accessToken: string,
   planKey: PaidPlanKey,
   appUrl: string,
+  returnTo: BillingReturnTo = 'editor',
 ): Promise<{ confirmationUrl: string; subscriptionId: string | null; test: boolean }> {
   const plan = PAID_PLANS[planKey];
   const test = await shouldUseTestCharge(shop, accessToken);
 
   const variables: Record<string, any> = {
     name: plan.name,
-    returnUrl: buildReturnUrl(appUrl, shop, planKey),
+    returnUrl: buildReturnUrl(appUrl, shop, planKey, returnTo),
     test,
     lineItems: [
       {
