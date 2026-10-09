@@ -6,6 +6,7 @@ import {
   createSubscription,
   getPlanInfo,
   invalidatePlanCache,
+  isBillingReturnTo,
   isPaidPlanKey,
   PAID_PLANS,
 } from '@/lib/billing';
@@ -48,7 +49,8 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const result = await createSubscription(shop, accessToken, planKey, getAppUrl(req));
+    const returnTo = isBillingReturnTo(body?.returnTo) ? body.returnTo : 'editor';
+    const result = await createSubscription(shop, accessToken, planKey, getAppUrl(req), returnTo);
     invalidatePlanCache(shop);
     console.log('[billing] subscription created', shop, planKey, result.subscriptionId, 'test=', result.test);
     return NextResponse.json({ confirmationUrl: result.confirmationUrl, test: result.test });
