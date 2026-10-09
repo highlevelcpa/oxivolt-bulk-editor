@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getBearerToken, verifySessionToken, shopifyGraphQL } from '@/lib/shopify';
 import { getWorkingAccessToken, ReauthRequiredError } from '@/lib/access-token';
-import { getPlanInfo } from '@/lib/billing';
+import { limitExceededResponse, requireActivePlan } from '@/lib/billing-guard';
 import { prisma } from '@/lib/db';
 import { incrementUsage } from '@/lib/usage';
 
@@ -106,18 +106,12 @@ export async function POST(req: NextRequest) {
       throw e;
     }
 
-    // Enforce the free-plan product limit (defense in depth; the UI also gates).
-    const planInfo = await getPlanInfo(shop, accessToken);
+    // Billing gate + free-plan product limit (defense in depth; the UI also gates).
+    const gate = await requireActivePlan(shop, accessToken);
+    if (!gate.ok) return gate.response;
+    const { planInfo } = gate;
     if (planInfo.productLimit !== null && updates.length > planInfo.productLimit) {
-      return NextResponse.json(
-        {
-          error: `limit_exceeded`,
-          message: `Your ${planInfo.planName} plan allows editing up to ${planInfo.productLimit} products at a time. Upgrade to edit more.`,
-          productLimit: planInfo.productLimit,
-          upgradeUrl: planInfo.upgradeUrl,
-        },
-        { status: 402 },
-      );
+      return limitExceededResponse(planInfo, 'editing');
     }
 
     // Resolve primary location once (needed for inventory changes).

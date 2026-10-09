@@ -1,11 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getBearerToken, verifySessionToken } from '@/lib/shopify';
 import { getWorkingAccessToken, ReauthRequiredError } from '@/lib/access-token';
-import { getPlanInfo } from '@/lib/billing';
+import { BillingError, getPlanInfo } from '@/lib/billing';
 
 export const dynamic = 'force-dynamic';
 
-// Returns the current subscription plan + product limit for the calling shop.
+// Returns the live billing state for the calling shop. `requiresPlanSelection`
+// tells the client to show the plan-selection gate (first install, reinstall,
+// declined charge, or cancelled subscription).
 export async function GET(req: NextRequest) {
   try {
     const token = getBearerToken(req);
@@ -24,12 +26,14 @@ export async function GET(req: NextRequest) {
       throw e;
     }
 
-    const info = await getPlanInfo(shop, accessToken);
+    const fresh = req.nextUrl.searchParams.get('fresh') === '1';
+    const info = await getPlanInfo(shop, accessToken, { fresh });
     return NextResponse.json({ shop, ...info });
   } catch (e: any) {
+    const code = e instanceof BillingError ? e.code : undefined;
     return NextResponse.json(
-      { error: e?.message ?? 'Failed to load subscription' },
-      { status: 500 },
+      { error: code ?? e?.message ?? 'Failed to load subscription', message: e?.message },
+      { status: code ? 503 : 500 },
     );
   }
 }

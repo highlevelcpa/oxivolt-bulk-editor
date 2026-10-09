@@ -28,3 +28,23 @@ GEMINI_API_KEY=<your_gemini_api_key>
 # features when every Gemini key above is exhausted. Get one at
 # https://apps.abacus.ai/ -> API Keys.
 ABACUS_API_KEY=<your_abacus_api_key>
+
+# ===== Shopify Billing API (Manual pricing) =====
+# IMPORTANT: in the Partner Dashboard -> your app -> Distribution / Pricing,
+# the app must use MANUAL pricing (Billing API), not "Managed pricing".
+# Every install/reinstall must pick a plan before the editor unlocks; paid
+# plans are created with appSubscriptionCreate and must be approved by the
+# merchant inside Shopify.
+#
+# Offer the Free plan (100 products per operation). true | false
+BILLING_FREE_PLAN_ENABLED=true
+# Free-trial days for paid plans (0 = no trial)
+BILLING_TRIAL_DAYS=0
+# Currency of the paid plans
+BILLING_CURRENCY=USD
+# Paid plan prices
+BILLING_PRO_MONTHLY_PRICE=29.99
+BILLING_PRO_ANNUAL_PRICE=99.99
+# Test charges: auto = test charges only on development stores, true = always
+# (use while Shopify reviews the app), false = always real charges
+BILLING_TEST_MODE=auto

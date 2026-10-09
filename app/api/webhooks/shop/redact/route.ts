@@ -1,6 +1,7 @@
 import { NextRequest } from 'next/server';
 import { handleComplianceWebhook } from '@/lib/webhooks';
 import { prisma } from '@/lib/db';
+import { clearBillingState } from '@/lib/billing';
 
 export const dynamic = 'force-dynamic';
 
@@ -12,6 +13,8 @@ export async function POST(req: NextRequest) {
     if (!shop) return;
     await prisma.editLog.deleteMany({ where: { shop } }).catch(() => {});
     await prisma.shopSession.deleteMany({ where: { shop } }).catch(() => {});
+    await prisma.usageCounter.deleteMany({ where: { shop } }).catch(() => {});
+    await clearBillingState(shop);
     console.log('[gdpr] shop/redact completed for shop:', shop);
   });
 }

@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import Image from 'next/image';
 import { toast } from 'sonner';
 import { authFetch } from '@/lib/client-api';
+import PlanSelection, { type BillingNotice, type PaidPlanKey, type PlanInfo } from '@/components/plan-selection';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -70,16 +71,12 @@ const CHUNK_SIZE = 5;
 const CAT_CHUNK_SIZE = 3;
 const PAGE_SIZE = 50;
 
-type PlanInfo = {
-  plan: 'free' | 'pro';
-  planName: string;
-  productLimit: number | null; // null = unlimited
-  upgradeUrl: string;
-};
-
 // Open a URL at the top level (breaks out of the Shopify admin iframe).
+// App Bridge intercepts window.open(url, '_top'), which is the supported way to
+// send the merchant to Shopify's charge-approval page from an embedded app.
 function openTopLevel(url: string) {
   try {
+    if (typeof window !== 'undefined' && window.open(url, '_top')) return;
     if (typeof window !== 'undefined' && window.top) {
       window.top.location.href = url;
     } else if (typeof window !== 'undefined') {
@@ -117,6 +114,12 @@ export default function BulkEditor({ shop, host }: { shop: string; host: string 
   const [loadError, setLoadError] = useState('');
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [planInfo, setPlanInfo] = useState<PlanInfo | null>(null);
+  const [planLoading, setPlanLoading] = useState(true);
+  const [planError, setPlanError] = useState('');
+  const [showPlans, setShowPlans] = useState(false);
+  const [billingBusy, setBillingBusy] = useState<string | null>(null);
+  const [billingError, setBillingError] = useState('');
+  const [billingNotice, setBillingNotice] = useState<BillingNotice>(null);
 
   // Which fields to edit
   const [applyVendor, setApplyVendor] = useState(true);
@@ -170,6 +173,16 @@ export default function BulkEditor({ shop, host }: { shop: string; host: string 
     setLoadError('');
     try {
       const res = await authFetch('/api/products', { method: 'GET' });
+      if (res.status === 402) {
+        // Subscription was cancelled/declined since the page loaded -> show the plan gate.
+        setProducts([]);
+        setPlanInfo((prev) =>
+          prev
+            ? { ...prev, plan: 'none', requiresPlanSelection: true, hasActiveSubscription: false, subscription: null }
+            : prev,
+        );
+        return;
+      }
       if (res.status === 401) {
         const info = await res.json().catch(() => ({}));
         if (info?.error === 'reauth_required') {
@@ -197,23 +210,33 @@ export default function BulkEditor({ shop, host }: { shop: string; host: string 
     }
   }, [shop]);
 
-  const loadPlan = useCallback(async () => {
-    try {
-      const res = await authFetch('/api/subscription', { method: 'GET' });
-      if (!res.ok) return;
-      const data = await res.json().catch(() => ({}));
-      if (data?.plan) {
-        setPlanInfo({
-          plan: data.plan,
-          planName: data.planName ?? (data.plan === 'pro' ? 'Pro' : 'Free'),
-          productLimit: data.productLimit ?? null,
-          upgradeUrl: data.upgradeUrl ?? '',
-        });
+  // Loads the live billing state. Returns null if it could not be determined.
+  const loadPlan = useCallback(
+    async (fresh = false): Promise<PlanInfo | null> => {
+      setPlanError('');
+      try {
+        const res = await authFetch(`/api/subscription${fresh ? '?fresh=1' : ''}`, { method: 'GET' });
+        const data = await res.json().catch(() => ({}));
+        if (res.status === 401 && data?.error === 'reauth_required') {
+          triggerReauth(shop);
+          return null;
+        }
+        if (!res.ok || !data?.plan) {
+          setPlanError(data?.message ?? 'Could not verify your subscription. Please reload the app.');
+          return null;
+        }
+        const info = data as PlanInfo;
+        setPlanInfo(info);
+        return info;
+      } catch (e: any) {
+        setPlanError(e?.message ?? 'Could not verify your subscription. Please reload the app.');
+        return null;
+      } finally {
+        setPlanLoading(false);
       }
-    } catch {
-      // non-fatal: leave plan unknown, limits are re-checked server-side
-    }
-  }, []);
+    },
+    [shop],
+  );
 
   const loadUsage = useCallback(async () => {
     try {
@@ -228,10 +251,84 @@ export default function BulkEditor({ shop, host }: { shop: string; host: string 
     }
   }, []);
 
+  // Creates a Shopify app subscription and sends the merchant to Shopify's
+  // approval page, where they accept or decline the charge.
+  const choosePaidPlan = useCallback(async (key: PaidPlanKey) => {
+    setBillingBusy(key);
+    setBillingError('');
+    try {
+      const res = await authFetch('/api/billing/subscribe', {
+        method: 'POST',
+        body: JSON.stringify({ plan: key }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data?.confirmationUrl) {
+        setBillingError(data?.message ?? 'Could not start the subscription. Please try again.');
+        setBillingBusy(null);
+        return;
+      }
+      openTopLevel(data.confirmationUrl);
+      // Keep the button spinning while the browser navigates away.
+    } catch (e: any) {
+      setBillingError(e?.message ?? 'Could not start the subscription. Please try again.');
+      setBillingBusy(null);
+    }
+  }, []);
+
+  const chooseFreePlan = useCallback(async () => {
+    setBillingBusy('free');
+    setBillingError('');
+    try {
+      const res = await authFetch('/api/billing/free', { method: 'POST' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data?.plan) {
+        setBillingError(data?.message ?? 'Could not switch to the Free plan.');
+        return;
+      }
+      const wasGated = planInfo?.requiresPlanSelection ?? true;
+      setPlanInfo(data as PlanInfo);
+      setShowPlans(false);
+      setBillingNotice(null);
+      toast.success('You are on the Free plan.');
+      if (wasGated) {
+        loadProducts();
+        loadUsage();
+      }
+    } catch (e: any) {
+      setBillingError(e?.message ?? 'Could not switch to the Free plan.');
+    } finally {
+      setBillingBusy(null);
+    }
+  }, [planInfo, loadProducts, loadUsage]);
+
+  // Billing check runs FIRST: the editor only loads once the merchant has an
+  // active subscription or has explicitly chosen the Free plan for this install.
   useEffect(() => {
-    loadProducts();
-    loadPlan();
-    loadUsage();
+    let cancelled = false;
+    // Shopify's billing callback redirects back with ?billing=accepted|declined|unknown.
+    const param = new URLSearchParams(window.location.search).get('billing');
+    const notice: BillingNotice =
+      param === 'accepted' || param === 'declined' || param === 'unknown' ? param : null;
+
+    (async () => {
+      const info = await loadPlan(notice !== null);
+      if (cancelled) return;
+      setBillingNotice(notice);
+      if (!info || info.requiresPlanSelection) {
+        setLoading(false);
+        return;
+      }
+      if (notice === 'accepted' || (notice === 'unknown' && info.hasActiveSubscription)) {
+        toast.success(`Subscription approved — welcome to ${info.planName}!`);
+      } else if (notice === 'declined') {
+        toast.message('The subscription charge was declined. You were not charged.');
+      }
+      loadProducts();
+      loadUsage();
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, [loadProducts, loadPlan, loadUsage]);
 
   const filtered = useMemo(() => {
@@ -315,7 +412,8 @@ export default function BulkEditor({ shop, host }: { shop: string; host: string 
   const overLimit = productLimit !== null && selected.size > productLimit;
 
   const goUpgrade = () => {
-    if (planInfo?.upgradeUrl) openTopLevel(planInfo.upgradeUrl);
+    setBillingError('');
+    setShowPlans(true);
   };
 
   const handlePreview = () => {
@@ -768,6 +866,54 @@ export default function BulkEditor({ shop, host }: { shop: string; host: string 
     toast.success(`Exported ${rows.length} product${rows.length === 1 ? '' : 's'} to CSV.`);
   };
 
+  // ---- Billing gate -------------------------------------------------------
+  if (planLoading) {
+    return (
+      <main className="flex min-h-screen flex-col items-center justify-center gap-3 bg-background text-foreground">
+        <Loader2 className="h-8 w-8 animate-spin text-primary" />
+        <p className="text-sm text-muted-foreground">Checking your subscription…</p>
+      </main>
+    );
+  }
+  if (!planInfo) {
+    return (
+      <main className="flex min-h-screen flex-col items-center justify-center gap-4 bg-background px-4 text-center text-foreground">
+        <AlertTriangle className="h-8 w-8 text-destructive" />
+        <p className="max-w-md text-sm text-muted-foreground">
+          {planError || 'Could not verify your subscription.'}
+        </p>
+        <Button
+          onClick={() => {
+            setPlanLoading(true);
+            loadPlan(true).then((info) => {
+              if (info && !info.requiresPlanSelection) {
+                loadProducts();
+                loadUsage();
+              }
+            });
+          }}
+        >
+          <RefreshCw className="mr-2 h-4 w-4" /> Try again
+        </Button>
+      </main>
+    );
+  }
+  if (planInfo.requiresPlanSelection || showPlans) {
+    return (
+      <main className="min-h-screen bg-background text-foreground">
+        <PlanSelection
+          planInfo={planInfo}
+          busy={billingBusy}
+          notice={billingNotice}
+          error={billingError}
+          onChoosePaid={choosePaidPlan}
+          onChooseFree={chooseFreePlan}
+          onClose={planInfo.requiresPlanSelection ? undefined : () => setShowPlans(false)}
+        />
+      </main>
+    );
+  }
+
   return (
     <main className="min-h-screen bg-background text-foreground">
       <div className="mx-auto w-full max-w-[1200px] px-4 py-6 sm:px-6">
@@ -801,11 +947,18 @@ export default function BulkEditor({ shop, host }: { shop: string; host: string 
                 {usage.count} processed this month
               </Badge>
             ) : null}
+            {planInfo?.subscription?.test ? (
+              <Badge variant="outline" className="px-2.5 py-1 text-xs">Test charge</Badge>
+            ) : null}
             {isFree ? (
               <Button variant="default" size="sm" onClick={goUpgrade} className="gap-1.5">
                 <Crown className="h-4 w-4" /> Upgrade
               </Button>
-            ) : null}
+            ) : (
+              <Button variant="outline" size="sm" onClick={goUpgrade} className="gap-1.5">
+                <Crown className="h-4 w-4" /> Manage plan
+              </Button>
+            )}
             <Button variant="outline" onClick={exportCsv} disabled={loading} className="gap-1.5">
               <Download className="h-4 w-4" /> Export CSV
             </Button>

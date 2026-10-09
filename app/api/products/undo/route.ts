@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getBearerToken, verifySessionToken, shopifyGraphQL } from '@/lib/shopify';
 import { getWorkingAccessToken, ReauthRequiredError } from '@/lib/access-token';
+import { requireActivePlan } from '@/lib/billing-guard';
 import { prisma } from '@/lib/db';
 
 export const dynamic = 'force-dynamic';
@@ -86,6 +87,9 @@ export async function POST(req: NextRequest) {
       }
       throw e;
     }
+
+    const gate = await requireActivePlan(shop, accessToken);
+    if (!gate.ok) return gate.response;
 
     const productId = entry.productId;
     const errorParts: string[] = [];

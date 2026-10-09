@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getBearerToken, verifySessionToken, shopifyGraphQL } from '@/lib/shopify';
 import { getWorkingAccessToken, ReauthRequiredError } from '@/lib/access-token';
+import { requireActivePlan } from '@/lib/billing-guard';
 
 export const dynamic = 'force-dynamic';
 
@@ -51,6 +52,10 @@ export async function GET(req: NextRequest) {
       }
       throw e;
     }
+
+    // Billing gate: no product data until the merchant has an active plan.
+    const gate = await requireActivePlan(shop, accessToken);
+    if (!gate.ok) return gate.response;
 
     const products: any[] = [];
     let cursor: string | null = null;

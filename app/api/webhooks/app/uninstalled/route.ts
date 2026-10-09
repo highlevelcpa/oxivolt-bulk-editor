@@ -1,6 +1,7 @@
 import { NextRequest } from 'next/server';
 import { handleComplianceWebhook } from '@/lib/webhooks';
 import { prisma } from '@/lib/db';
+import { clearBillingState } from '@/lib/billing';
 
 export const dynamic = 'force-dynamic';
 
@@ -11,6 +12,9 @@ export async function POST(req: NextRequest) {
     const shop: string | undefined = payload?.myshopify_domain ?? payload?.shop_domain;
     if (!shop) return;
     await prisma.shopSession.deleteMany({ where: { shop } }).catch(() => {});
-    console.log('[app] uninstalled, session removed for shop:', shop);
+    // Shopify cancels the app subscription on uninstall; wipe our plan choice too
+    // so a reinstall must select a plan / approve charges again.
+    await clearBillingState(shop);
+    console.log('[app] uninstalled, session + billing state removed for shop:', shop);
   });
 }

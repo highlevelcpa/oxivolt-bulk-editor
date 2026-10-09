@@ -19,6 +19,25 @@ model ShopSession {
   updatedAt      DateTime  @updatedAt
 }
 
+// Local billing record per shop. Access is ALWAYS decided from Shopify's live
+// `currentAppInstallation.activeSubscriptions`; this table only stores the
+// merchant's explicit Free-plan choice (per installation) and diagnostics.
+// Deleted on app/uninstalled so a reinstall must go through plan approval again.
+model ShopBilling {
+  id                    String    @id @default(cuid())
+  shop                  String    @unique
+  installationId        String?
+  freePlanSelectedAt    DateTime?
+  subscriptionId        String?
+  subscriptionStatus    String?
+  pendingSubscriptionId String?
+  pendingPlan           String?
+  lastChargeResult      String?   // "accepted" | "declined" | "unknown"
+  lastChargeAt          DateTime?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+}
+
 // Audit log of bulk edit operations for the merchant to review.
 model EditLog {
   id          String   @id @default(cuid())
