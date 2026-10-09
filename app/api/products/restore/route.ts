@@ -193,12 +193,12 @@ export async function POST(req: NextRequest) {
             input: {
               name: 'available',
               reason: 'correction',
-              ignoreCompareQuantity: true,
               quantities: [
                 {
                   inventoryItemId: merged.inventoryItemId,
                   locationId,
                   quantity: Number(merged.quantity),
+                  changeFromQuantity: null,
                 },
               ],
             },
