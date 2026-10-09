@@ -45,6 +45,8 @@ type Props = {
   onChoosePaid: (key: PaidPlanKey) => void;
   onChooseFree: () => void;
   onClose?: () => void; // present when shown as a modal (merchant already has a plan)
+  title?: string;
+  subtitle?: string;
 };
 
 function price(p: BillingPlan) {
@@ -61,6 +63,8 @@ export default function PlanSelection({
   onChoosePaid,
   onChooseFree,
   onClose,
+  title = 'Choose your plan',
+  subtitle = 'Billing is handled securely by Shopify and appears on your Shopify invoice.',
 }: Props) {
   const currentInterval = planInfo.subscription?.interval ?? null;
   const isCurrentFree = planInfo.plan === 'free';
@@ -73,10 +77,8 @@ export default function PlanSelection({
             <Zap className="h-6 w-6" />
           </span>
           <div>
-            <h1 className="font-display text-2xl font-bold tracking-tight">Choose your plan</h1>
-            <p className="text-sm text-muted-foreground">
-              Billing is handled securely by Shopify and appears on your Shopify invoice.
-            </p>
+            <h1 className="font-display text-2xl font-bold tracking-tight">{title}</h1>
+            <p className="text-sm text-muted-foreground">{subtitle}</p>
           </div>
         </div>
         {onClose ? (
