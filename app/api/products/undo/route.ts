@@ -154,12 +154,12 @@ export async function POST(req: NextRequest) {
             input: {
               name: 'available',
               reason: 'correction',
-              ignoreCompareQuantity: true,
               quantities: [
                 {
                   inventoryItemId: previous.inventoryItemId,
                   locationId,
                   quantity: Number(previous.quantity),
+                  changeFromQuantity: null,
                 },
               ],
             },
