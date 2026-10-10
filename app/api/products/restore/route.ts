@@ -190,15 +190,17 @@ export async function POST(req: NextRequest) {
       } else {
         try {
           const d: any = await shopifyGraphQL(shop, accessToken, INV_SET, {
+            // API 2025-07: skip compare-and-set via `ignoreCompareQuantity`
+            // (`changeFromQuantity` is not defined on InventoryQuantityInput).
             input: {
               name: 'available',
               reason: 'correction',
+              ignoreCompareQuantity: true,
               quantities: [
                 {
                   inventoryItemId: merged.inventoryItemId,
                   locationId,
                   quantity: Number(merged.quantity),
-                  changeFromQuantity: null,
                 },
               ],
             },

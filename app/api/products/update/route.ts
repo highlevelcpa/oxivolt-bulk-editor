@@ -197,7 +197,9 @@ export async function POST(req: NextRequest) {
 
       // 3) Quantity / inventory
       const wantsQuantity = u?.quantity !== null && u?.quantity !== undefined;
-      if (wantsQuantity && !u?.inventoryItemId) {
+      if (wantsQuantity && !Number.isInteger(Number(u.quantity))) {
+        errorParts.push('quantity: invalid quantity (must be a whole number)');
+      } else if (wantsQuantity && !u?.inventoryItemId) {
         errorParts.push('quantity: missing inventory item id for this product');
       } else if (wantsQuantity && !locationId) {
         errorParts.push('quantity: no active store location found');
@@ -213,17 +215,20 @@ export async function POST(req: NextRequest) {
             inventoryItemId: u.inventoryItemId,
             locationId,
           }).catch(() => null);
-          // Set the available quantity.
+          // Set the available quantity (absolute value, not a relative adjustment).
+          // API 2025-07: `changeFromQuantity` does not exist on InventoryQuantityInput
+          // (added in 2026-01). Skipping the compare-and-set check is expressed with
+          // `ignoreCompareQuantity: true` on InventorySetQuantitiesInput.
           const d: any = await shopifyGraphQL(shop, accessToken, INV_SET, {
             input: {
               name: 'available',
               reason: 'correction',
+              ignoreCompareQuantity: true,
               quantities: [
                 {
                   inventoryItemId: u.inventoryItemId,
                   locationId,
                   quantity: Number(u.quantity),
-                  changeFromQuantity: null,
                 },
               ],
             },
