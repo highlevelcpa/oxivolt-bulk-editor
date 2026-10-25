@@ -3,6 +3,7 @@ import { getBearerToken, verifySessionToken, shopifyGraphQL } from '@/lib/shopif
 import { getWorkingAccessToken, ReauthRequiredError } from '@/lib/access-token';
 import { requireActivePlan } from '@/lib/billing-guard';
 import { prisma } from '@/lib/db';
+import { INV_SET_QUANTITIES, inventorySetVariables } from '@/lib/inventory';
 
 export const dynamic = 'force-dynamic';
 
@@ -23,14 +24,6 @@ const VARIANT_PRICE_UPDATE = `
   mutation VariantPrice($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
     productVariantsBulkUpdate(productId: $productId, variants: $variants) {
       productVariants { id price }
-      userErrors { field message }
-    }
-  }
-`;
-
-const INV_SET = `
-  mutation InvSet($input: InventorySetQuantitiesInput!) {
-    inventorySetQuantities(input: $input) {
       userErrors { field message }
     }
   }
@@ -189,22 +182,13 @@ export async function POST(req: NextRequest) {
         errorParts.push('quantity: no active store location found');
       } else {
         try {
-          const d: any = await shopifyGraphQL(shop, accessToken, INV_SET, {
-            // API 2025-07: skip compare-and-set via `ignoreCompareQuantity`
-            // (`changeFromQuantity` is not defined on InventoryQuantityInput).
-            input: {
-              name: 'available',
-              reason: 'correction',
-              ignoreCompareQuantity: true,
-              quantities: [
-                {
-                  inventoryItemId: merged.inventoryItemId,
-                  locationId,
-                  quantity: Number(merged.quantity),
-                },
-              ],
-            },
-          });
+          // Absolute set back to the original value (see lib/inventory.ts).
+          const d: any = await shopifyGraphQL(
+            shop,
+            accessToken,
+            INV_SET_QUANTITIES,
+            inventorySetVariables(merged.inventoryItemId, locationId, Number(merged.quantity)),
+          );
           const err = firstError(d?.inventorySetQuantities?.userErrors);
           if (err) errorParts.push(`quantity: ${err}`);
         } catch (e: any) {

@@ -20,22 +20,29 @@ process.env.SHOPIFY_API_KEY = API_KEY;
 process.env.SHOPIFY_API_SECRET = API_SECRET;
 
 // ---------------------------------------------------------------------------
-// Shopify Admin API 2025-07 schema rules for inventorySetQuantities.
+// Shopify Admin API 2026-04+ rules for inventorySetQuantities.
+// API_VERSION still names 2025-07, which Shopify no longer serves; requests fall
+// forward to 2026-01 (today) and 2026-04 (from 2027-01-16). The 2026-04 rules are the
+// stricter of the two, so a payload that passes them is valid on both:
+//   - `ignoreCompareQuantity` / `compareQuantity` removed (deprecated in 2026-01)
+//   - every quantity must include `changeFromQuantity` (null = skip the CAS check)
+//   - `@idempotent(key:)` directive required (optional in 2026-01)
 // ---------------------------------------------------------------------------
-const SET_INPUT_FIELDS_2025_07 = ['name', 'reason', 'referenceDocumentUri', 'quantities', 'ignoreCompareQuantity'];
-const QTY_INPUT_FIELDS_2025_07 = ['inventoryItemId', 'locationId', 'quantity', 'compareQuantity'];
+const SET_INPUT_FIELDS_2026_04 = ['name', 'reason', 'referenceDocumentUri', 'quantities'];
+const QTY_INPUT_FIELDS_2026_04 = ['inventoryItemId', 'locationId', 'quantity', 'changeFromQuantity'];
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
-// Mirrors the top-level GraphQL error Shopify returns for unknown input fields.
-function validateSetInput2025_07(input: any): any[] | null {
+// Mirrors the top-level GraphQL errors Shopify returns for invalid input fields.
+function validateSetInput2026_04(input: any): any[] | null {
   for (const k of Object.keys(input ?? {})) {
-    if (!SET_INPUT_FIELDS_2025_07.includes(k)) {
+    if (!SET_INPUT_FIELDS_2026_04.includes(k)) {
       return [{ message: `Variable $input of type InventorySetQuantitiesInput! was provided invalid value for ${k} (Field is not defined on InventorySetQuantitiesInput)` }];
     }
   }
   const quantities = Array.isArray(input?.quantities) ? input.quantities : [];
   for (let i = 0; i < quantities.length; i++) {
     for (const k of Object.keys(quantities[i] ?? {})) {
-      if (!QTY_INPUT_FIELDS_2025_07.includes(k)) {
+      if (!QTY_INPUT_FIELDS_2026_04.includes(k)) {
         return [{ message: `Variable $input of type InventorySetQuantitiesInput! was provided invalid value for quantities.${i}.${k} (Field is not defined on InventoryQuantityInput)` }];
       }
     }
@@ -44,6 +51,20 @@ function validateSetInput2025_07(input: any): any[] | null {
         return [{ message: `Variable $input of type InventorySetQuantitiesInput! was provided invalid value for quantities.${i}.${req} (Expected value to not be null)` }];
       }
     }
+    if (!('changeFromQuantity' in (quantities[i] ?? {}))) {
+      return [{ message: `quantities.${i}.changeFromQuantity must be provided (pass null to skip the compare-and-swap check)` }];
+    }
+  }
+  return null;
+}
+
+// 2026-04: the mutation must carry @idempotent(key:) with a non-empty key.
+function validateIdempotency(query: string, vars: any): any[] | null {
+  if (!/inventorySetQuantities\(input: \$input\)\s*@idempotent\(key: \$idempotencyKey\)/.test(query)) {
+    return [{ message: 'The @idempotent directive is required for this mutation.' }];
+  }
+  if (typeof vars?.idempotencyKey !== 'string' || !vars.idempotencyKey) {
+    return [{ message: 'Variable $idempotencyKey of type String! was provided invalid value' }];
   }
   return null;
 }
@@ -75,7 +96,7 @@ function jsonResponse(body: any, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 }
 
-function defaultHandler(op: string, vars: any): any {
+function defaultHandler(op: string, vars: any, query = ''): any {
   switch (op) {
     case 'probe':
       return { data: { shop: { id: 'gid://shopify/Shop/1' } } };
@@ -99,20 +120,8 @@ function defaultHandler(op: string, vars: any): any {
     case 'invActivate':
       return { data: { inventoryActivate: { inventoryLevel: { id: 'gid://shopify/InventoryLevel/1' }, userErrors: [] } } };
     case 'invSet': {
-      const errors = validateSetInput2025_07(vars?.input);
+      const errors = validateIdempotency(query, vars) ?? validateSetInput2026_04(vars?.input);
       if (errors) return { errors };
-      // 2025-07 runtime rule: compare check must be provided or explicitly ignored.
-      const ignore = vars?.input?.ignoreCompareQuantity === true;
-      const missingCompare = (vars?.input?.quantities ?? []).some((q: any) => q?.compareQuantity === undefined);
-      if (!ignore && missingCompare) {
-        return {
-          data: {
-            inventorySetQuantities: {
-              userErrors: [{ field: ['input', 'ignoreCompareQuantity'], message: 'The compareQuantity argument must be given to each quantity or ignored using ignoreCompareQuantity.' }],
-            },
-          },
-        };
-      }
       return { data: { inventorySetQuantities: { userErrors: [] } } };
     }
     default:
@@ -128,7 +137,7 @@ const fetchMock = async (url: any, init: any) => {
   const op = opName(body.query);
   calls.push({ query: body.query, variables: body.variables, headers });
   const handler = overrides[op];
-  const result = handler ? handler(body.variables) : defaultHandler(op, body.variables);
+  const result = handler ? handler(body.variables) : defaultHandler(op, body.variables, body.query);
   if (result instanceof Response) return result;
   return jsonResponse(result);
 };
@@ -213,7 +222,7 @@ function product(n: number, extra: Record<string, any> = {}) {
 // ---------------------------------------------------------------------------
 // 1. Valid absolute update
 // ---------------------------------------------------------------------------
-test('sets an absolute available quantity with a 2025-07-valid payload', async () => {
+test('sets an absolute available quantity with a 2026-01/2026-04-valid payload', async () => {
   const { status, json } = await postUpdate([product(1, { quantity: 200, prevQuantity: 7 })]);
   assert.equal(status, 200);
   assert.deepEqual(json.results, [
@@ -222,16 +231,20 @@ test('sets an absolute available quantity with a 2025-07-valid payload', async (
 
   const sets = callsOf('invSet');
   assert.equal(sets.length, 1);
-  assert.deepEqual(sets[0].variables, {
+  const { idempotencyKey, ...rest } = sets[0].variables;
+  assert.deepEqual(rest, {
     input: {
       name: 'available',
       reason: 'correction',
-      ignoreCompareQuantity: true,
-      quantities: [{ inventoryItemId: 'gid://shopify/InventoryItem/1', locationId: LOCATION_ID, quantity: 200 }],
+      quantities: [{ inventoryItemId: 'gid://shopify/InventoryItem/1', locationId: LOCATION_ID, quantity: 200, changeFromQuantity: null }],
     },
   });
-  assert.equal(validateSetInput2025_07(sets[0].variables.input), null);
-  assert.ok(!JSON.stringify(sets[0].variables).includes('changeFromQuantity'));
+  assert.match(idempotencyKey, UUID_RE);
+  assert.match(sets[0].query, /inventorySetQuantities\(input: \$input\) @idempotent\(key: \$idempotencyKey\)/);
+  assert.equal(validateSetInput2026_04(sets[0].variables.input), null);
+  assert.equal(validateIdempotency(sets[0].query, sets[0].variables), null);
+  assert.ok(!JSON.stringify(sets[0]).includes('ignoreCompareQuantity'));
+  assert.ok(!JSON.stringify(sets[0]).includes('compareQuantity'));
 
   // Undo data preserved.
   assert.equal(editLogs.length, 1);
@@ -285,7 +298,7 @@ test('one failing product does not mark the others as failed (and vice versa)', 
     if (id.endsWith('/2')) {
       return { data: { inventorySetQuantities: { userErrors: [{ field: ['input'], message: 'Inventory item not found' }] } } };
     }
-    return defaultHandler('invSet', vars);
+    return { data: { inventorySetQuantities: { userErrors: [] } } };
   };
   const { json } = await postUpdate([1, 2, 3].map((n) => product(n, { quantity: 5 })));
   assert.deepEqual(json.results.map((r: any) => r.success), [true, false, true]);
@@ -406,25 +419,53 @@ test('quantity omitted (null) does not trigger any inventory call', async () => 
 // ---------------------------------------------------------------------------
 // 7. Compare-and-set handling
 // ---------------------------------------------------------------------------
-test('compare check is explicitly skipped (absolute set) using the 2025-07 field, not changeFromQuantity', async () => {
+test('compare check is explicitly skipped (absolute set) with changeFromQuantity: null, never the deprecated fields', async () => {
   await postUpdate([product(1, { quantity: 200, prevQuantity: 999 })]);
   const input = callsOf('invSet')[0].variables.input;
-  assert.equal(input.ignoreCompareQuantity, true);
+  assert.ok(!('ignoreCompareQuantity' in input));
   for (const q of input.quantities) {
-    assert.ok(!('changeFromQuantity' in q));
+    assert.ok('changeFromQuantity' in q);
+    assert.equal(q.changeFromQuantity, null); // not the client-side prevQuantity (999)
     assert.ok(!('compareQuantity' in q));
   }
 });
 
-test('the old payload (changeFromQuantity) is rejected by the 2025-07 schema mock — reproduces the reported bug', () => {
-  const old = {
+test('the previous payload (ignoreCompareQuantity) is rejected by the 2026-04 schema mock', () => {
+  const old: any = {
     name: 'available',
     reason: 'correction',
-    quantities: [{ inventoryItemId: 'gid://shopify/InventoryItem/1', locationId: LOCATION_ID, quantity: 200, changeFromQuantity: null }],
+    ignoreCompareQuantity: true,
+    quantities: [{ inventoryItemId: 'gid://shopify/InventoryItem/1', locationId: LOCATION_ID, quantity: 200 }],
   };
-  const errs = validateSetInput2025_07(old);
-  assert.ok(errs);
-  assert.match(errs![0].message, /quantities\.0\.changeFromQuantity \(Field is not defined on InventoryQuantityInput\)/);
+  assert.match(validateSetInput2026_04(old)![0].message, /ignoreCompareQuantity \(Field is not defined on InventorySetQuantitiesInput\)/);
+  // ...and omitting changeFromQuantity is also rejected on 2026-04.
+  const withoutIgnore: Record<string, unknown> = { ...old };
+  delete withoutIgnore.ignoreCompareQuantity;
+  assert.match(validateSetInput2026_04(withoutIgnore)![0].message, /changeFromQuantity must be provided/);
+});
+
+test('a mutation without @idempotent is rejected by the 2026-04 mock', () => {
+  const legacy = 'mutation InvSet($input: InventorySetQuantitiesInput!) { inventorySetQuantities(input: $input) { userErrors { field message } } }';
+  assert.match(validateIdempotency(legacy, { input: {} })![0].message, /@idempotent directive is required/);
+});
+
+test('each inventory mutation gets its own idempotency key', async () => {
+  await postUpdate([1, 2, 3].map((n) => product(n, { quantity: 5 })));
+  const keys = callsOf('invSet').map((c) => c.variables.idempotencyKey);
+  assert.equal(keys.length, 3);
+  keys.forEach((k) => assert.match(k, UUID_RE));
+  assert.equal(new Set(keys).size, 3);
+});
+
+test('CHANGE_FROM_QUANTITY_STALE user error is reported as a failure', async () => {
+  overrides.invSet = () => ({
+    data: { inventorySetQuantities: { userErrors: [{ field: ['input', 'quantities', '0', 'changeFromQuantity'], message: 'The quantity has changed since it was last read.', code: 'CHANGE_FROM_QUANTITY_STALE' }] } },
+  });
+  const { json } = await postUpdate([product(1, { quantity: 10, prevQuantity: 4 })]);
+  assert.equal(json.results[0].success, false);
+  assert.equal(json.results[0].error, 'quantity: The quantity has changed since it was last read.');
+  assert.equal(editLogs[0].success, false);
+  assert.deepEqual(usageIncrements, []);
 });
 
 test('retrying the same request sends the same absolute value (no cumulative adjustment)', async () => {
@@ -432,7 +473,9 @@ test('retrying the same request sends the same absolute value (no cumulative adj
   await postUpdate([product(1, { quantity: 200 })]);
   const sets = callsOf('invSet');
   assert.equal(sets.length, 2);
-  assert.deepEqual(sets[0].variables, sets[1].variables);
+  assert.deepEqual(sets[0].variables.input, sets[1].variables.input);
+  // A retry is a new logical operation, so it gets a new idempotency key.
+  assert.notEqual(sets[0].variables.idempotencyKey, sets[1].variables.idempotencyKey);
 });
 
 // ---------------------------------------------------------------------------
@@ -470,22 +513,23 @@ test('a quantity failure does not hide a successful price change (partial result
 // ---------------------------------------------------------------------------
 // Undo / Restore use the same corrected inventorySetQuantities payload
 // ---------------------------------------------------------------------------
-test('undo restores the previous absolute quantity with a 2025-07-valid payload', async () => {
+test('undo restores the previous absolute quantity with a 2026-01/2026-04-valid payload', async () => {
   editLogRows = [{
     id: 'log1', shop: SHOP, productId: 'gid://shopify/Product/1', success: true, undone: false,
     previousValues: JSON.stringify({ quantity: 7, inventoryItemId: 'gid://shopify/InventoryItem/1', locationId: LOCATION_ID }),
   }];
   const res = await undoPOST(request('/api/products/undo', { editLogId: 'log1' }));
   assert.deepEqual(await res.json(), { success: true });
-  const input = callsOf('invSet')[0].variables.input;
-  assert.equal(validateSetInput2025_07(input), null);
-  assert.deepEqual(input, {
-    name: 'available', reason: 'correction', ignoreCompareQuantity: true,
-    quantities: [{ inventoryItemId: 'gid://shopify/InventoryItem/1', locationId: LOCATION_ID, quantity: 7 }],
+  const call = callsOf('invSet')[0];
+  assert.equal(validateSetInput2026_04(call.variables.input), null);
+  assert.equal(validateIdempotency(call.query, call.variables), null);
+  assert.deepEqual(call.variables.input, {
+    name: 'available', reason: 'correction',
+    quantities: [{ inventoryItemId: 'gid://shopify/InventoryItem/1', locationId: LOCATION_ID, quantity: 7, changeFromQuantity: null }],
   });
 });
 
-test('restore resets the original absolute quantity with a 2025-07-valid payload', async () => {
+test('restore resets the original absolute quantity with a 2026-01/2026-04-valid payload', async () => {
   editLogRows = [
     { id: 'a', shop: SHOP, productId: 'gid://shopify/Product/1', success: true, undone: false, previousValues: JSON.stringify({ quantity: 3, inventoryItemId: 'gid://shopify/InventoryItem/1', locationId: LOCATION_ID }) },
     { id: 'b', shop: SHOP, productId: 'gid://shopify/Product/1', success: true, undone: false, previousValues: JSON.stringify({ quantity: 200, inventoryItemId: 'gid://shopify/InventoryItem/1', locationId: LOCATION_ID }) },
@@ -495,8 +539,10 @@ test('restore resets the original absolute quantity with a 2025-07-valid payload
   assert.equal(body.success, true);
   const sets = callsOf('invSet');
   assert.equal(sets.length, 1);
-  assert.equal(validateSetInput2025_07(sets[0].variables.input), null);
+  assert.equal(validateSetInput2026_04(sets[0].variables.input), null);
+  assert.equal(validateIdempotency(sets[0].query, sets[0].variables), null);
   assert.equal(sets[0].variables.input.quantities[0].quantity, 3);
+  assert.equal(sets[0].variables.input.quantities[0].changeFromQuantity, null);
 });
 
 test('undo reports Shopify rejection instead of success', async () => {

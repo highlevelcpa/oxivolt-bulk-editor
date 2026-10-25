@@ -3,6 +3,7 @@ import { getBearerToken, verifySessionToken, shopifyGraphQL } from '@/lib/shopif
 import { getWorkingAccessToken, ReauthRequiredError } from '@/lib/access-token';
 import { limitExceededResponse, requireActivePlan } from '@/lib/billing-guard';
 import { prisma } from '@/lib/db';
+import { INV_SET_QUANTITIES, inventorySetVariables } from '@/lib/inventory';
 import { incrementUsage } from '@/lib/usage';
 
 export const dynamic = 'force-dynamic';
@@ -42,14 +43,6 @@ const INV_ACTIVATE = `
   mutation InvActivate($inventoryItemId: ID!, $locationId: ID!) {
     inventoryActivate(inventoryItemId: $inventoryItemId, locationId: $locationId) {
       inventoryLevel { id }
-      userErrors { field message }
-    }
-  }
-`;
-
-const INV_SET = `
-  mutation InvSet($input: InventorySetQuantitiesInput!) {
-    inventorySetQuantities(input: $input) {
       userErrors { field message }
     }
   }
@@ -216,23 +209,13 @@ export async function POST(req: NextRequest) {
             locationId,
           }).catch(() => null);
           // Set the available quantity (absolute value, not a relative adjustment).
-          // API 2025-07: `changeFromQuantity` does not exist on InventoryQuantityInput
-          // (added in 2026-01). Skipping the compare-and-set check is expressed with
-          // `ignoreCompareQuantity: true` on InventorySetQuantitiesInput.
-          const d: any = await shopifyGraphQL(shop, accessToken, INV_SET, {
-            input: {
-              name: 'available',
-              reason: 'correction',
-              ignoreCompareQuantity: true,
-              quantities: [
-                {
-                  inventoryItemId: u.inventoryItemId,
-                  locationId,
-                  quantity: Number(u.quantity),
-                },
-              ],
-            },
-          });
+          // See lib/inventory.ts for the compare-and-swap / idempotency handling.
+          const d: any = await shopifyGraphQL(
+            shop,
+            accessToken,
+            INV_SET_QUANTITIES,
+            inventorySetVariables(u.inventoryItemId, locationId, Number(u.quantity)),
+          );
           const err = firstError(d?.inventorySetQuantities?.userErrors);
           if (err) errorParts.push(`quantity: ${err}`);
           else {
