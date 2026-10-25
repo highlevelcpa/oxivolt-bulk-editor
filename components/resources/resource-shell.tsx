@@ -2,20 +2,26 @@ import Link from 'next/link';
 import type { Metadata } from 'next';
 import { Zap, Mail } from 'lucide-react';
 
-// Shared chrome for the public Help Center pages (/docs, /tutorial, /faq, /changelog).
-// Server component, no client JS. Keeps the existing /privacy page untouched.
+// Shared chrome for the public Help Center pages (/docs, /tutorial, /faq, /changelog, /privacy).
+// Server component, no client JS.
 
 export const SUPPORT_EMAIL = 'support@highlevelcpa.shop';
 export const YOUTUBE_ID = '8d0bBvcYTcs';
 
-export type ResourceKey = 'docs' | 'tutorial' | 'faq' | 'changelog';
+export type ResourceKey = 'docs' | 'tutorial' | 'faq' | 'changelog' | 'privacy';
 
-const NAV: { key: ResourceKey | 'privacy'; href: string; label: string }[] = [
+const NAV: { key: ResourceKey; href: string; label: string }[] = [
   { key: 'docs', href: '/docs', label: 'User Guide' },
   { key: 'tutorial', href: '/tutorial', label: 'Tutorial' },
   { key: 'faq', href: '/faq', label: 'FAQ' },
   { key: 'changelog', href: '/changelog', label: 'Changelog' },
   { key: 'privacy', href: '/privacy', label: 'Privacy' },
+];
+
+// Header adds a Home link (public landing page) before the Help Center items.
+const HEADER_NAV: { key: ResourceKey | 'home'; href: string; label: string }[] = [
+  { key: 'home', href: '/', label: 'Home' },
+  ...NAV,
 ];
 
 export function resourceMetadata(title: string, description: string): Metadata {
@@ -62,7 +68,7 @@ export function ResourceShell({
           </Link>
           <nav aria-label="Help Center" className="-mx-4 overflow-x-auto px-4 md:mx-0 md:px-0">
             <ul className="flex min-w-max items-center gap-1">
-              {NAV.map((item) => {
+              {HEADER_NAV.map((item) => {
                 const active = item.key === current;
                 return (
                   <li key={item.key}>

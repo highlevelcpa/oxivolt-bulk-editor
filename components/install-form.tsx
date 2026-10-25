@@ -1,6 +1,7 @@
 'use client';
 
 import { useState } from 'react';
+import Link from 'next/link';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card } from '@/components/ui/card';
@@ -38,6 +39,14 @@ export default function InstallForm() {
     { icon: Tag, title: 'Bulk pricing', desc: 'Multiply existing prices or set one fixed price.' },
     { icon: Boxes, title: 'Bulk inventory', desc: 'Push a single stock quantity to all products.' },
     { icon: RotateCcw, title: 'One-click restore', desc: 'Revert any product back to its original state after edits.' },
+  ];
+
+  const resources = [
+    { href: '/docs', label: 'User Guide' },
+    { href: '/tutorial', label: 'Tutorial' },
+    { href: '/faq', label: 'FAQ' },
+    { href: '/changelog', label: 'Changelog' },
+    { href: '/privacy', label: 'Privacy Policy' },
   ];
 
   return (
@@ -94,6 +103,20 @@ export default function InstallForm() {
             );
           })}
         </div>
+
+        <footer className="mt-12 w-full max-w-4xl border-t border-border pt-6">
+          <nav aria-label="Resources">
+            <ul className="flex flex-wrap items-center justify-center gap-x-5 gap-y-2 text-sm text-muted-foreground">
+              {resources.map((r) => (
+                <li key={r.href}>
+                  <Link href={r.href} className="hover:text-primary hover:underline">
+                    {r.label}
+                  </Link>
+                </li>
+              ))}
+            </ul>
+          </nav>
+        </footer>
       </div>
     </main>
   );
