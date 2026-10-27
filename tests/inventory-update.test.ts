@@ -21,9 +21,8 @@ process.env.SHOPIFY_API_SECRET = API_SECRET;
 
 // ---------------------------------------------------------------------------
 // Shopify Admin API 2026-04+ rules for inventorySetQuantities.
-// API_VERSION still names 2025-07, which Shopify no longer serves; requests fall
-// forward to 2026-01 (today) and 2026-04 (from 2027-01-16). The 2026-04 rules are the
-// stricter of the two, so a payload that passes them is valid on both:
+// API_VERSION explicitly targets 2026-01. The 2026-04 rules are the stricter of the
+// two, so a payload that passes them is valid on 2026-01 and ready for 2026-04:
 //   - `ignoreCompareQuantity` / `compareQuantity` removed (deprecated in 2026-01)
 //   - every quantity must include `changeFromQuantity` (null = skip the CAS check)
 //   - `@idempotent(key:)` directive required (optional in 2026-01)
@@ -131,7 +130,7 @@ function defaultHandler(op: string, vars: any, query = ''): any {
 
 const fetchMock = async (url: any, init: any) => {
   const href = String(url);
-  assert.ok(href.startsWith(`https://${SHOP}/admin/api/2025-07/graphql.json`), `unexpected fetch ${href}`);
+  assert.ok(href.startsWith(`https://${SHOP}/admin/api/2026-01/graphql.json`), `unexpected fetch ${href}`);
   const body = JSON.parse(init?.body ?? '{}');
   const headers = (init?.headers ?? {}) as Record<string, string>;
   const op = opName(body.query);

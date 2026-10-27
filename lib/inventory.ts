@@ -2,9 +2,8 @@ import { randomUUID } from 'crypto';
 
 // Shared `inventorySetQuantities` payload used by bulk update, undo and restore.
 //
-// API_VERSION (lib/shopify.ts) still names 2025-07, which Shopify no longer serves:
-// requests fall forward to the oldest accessible version (2026-01 today, 2026-04 from
-// 2027-01-16). This payload is valid on 2026-01 and on 2026-04+:
+// API_VERSION (lib/shopify.ts) explicitly targets 2026-01. This payload is valid on
+// 2026-01 and also on 2026-04+, so a future version bump needs no payload change:
 //   - `ignoreCompareQuantity` / `compareQuantity` are deprecated in 2026-01 and removed
 //     in 2026-04, so they are not sent.
 //   - `changeFromQuantity: null` explicitly skips the compare-and-swap check. The app
