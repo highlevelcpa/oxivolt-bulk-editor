@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import Image from 'next/image';
 import { toast } from 'sonner';
 import { authFetch } from '@/lib/client-api';
+import { validateBulkEdit } from '@/lib/bulk-validate';
 import PlanSelection, { type BillingNotice, type PaidPlanKey, type PlanInfo } from '@/components/plan-selection';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -331,6 +332,18 @@ export default function BulkEditor({ shop, host }: { shop: string; host: string 
     };
   }, [loadProducts, loadPlan, loadUsage]);
 
+  // Escape closes whichever modal is open.
+  useEffect(() => {
+    if (!showPreview && !showHistory) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      setShowPreview(false);
+      setShowHistory(false);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [showPreview, showHistory]);
+
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     return products.filter((p) => {
@@ -347,10 +360,16 @@ export default function BulkEditor({ shop, host }: { shop: string; host: string 
     });
   }, [products, search, statusFilter]);
 
-  // Reset to first page whenever the filter/search changes.
-  useEffect(() => {
+  // Changing the search/filter always returns to the first page. Done in the change
+  // handlers (not an effect) to avoid an extra render pass.
+  const updateSearch = (v: string) => {
+    setSearch(v);
     setPage(0);
-  }, [search, statusFilter]);
+  };
+  const updateStatusFilter = (v: typeof statusFilter) => {
+    setStatusFilter(v);
+    setPage(0);
+  };
 
   const selectedInFiltered = useMemo(
     () => filtered.reduce((acc, p) => (selected.has(p?.id) ? acc + 1 : acc), 0),
@@ -406,6 +425,18 @@ export default function BulkEditor({ shop, host }: { shop: string; host: string 
   );
 
   const noFieldSelected = !applyVendor && !applyPrice && !applyQuantity;
+  // Blocks Preview/Apply on input that would otherwise become a wrong write ($0.00 price,
+  // silently skipped quantity, truncated decimals). See lib/bulk-validate.ts.
+  const bulkError = validateBulkEdit({
+    applyVendor,
+    vendor,
+    applyPrice,
+    priceMode,
+    factor,
+    fixedPrice,
+    applyQuantity,
+    quantity,
+  });
 
   const productLimit = planInfo?.productLimit ?? null;
   const isFree = planInfo?.plan === 'free';
@@ -421,8 +452,8 @@ export default function BulkEditor({ shop, host }: { shop: string; host: string 
       toast.error('Select at least one product first.');
       return;
     }
-    if (noFieldSelected) {
-      toast.error('Enable at least one field to edit.');
+    if (bulkError) {
+      toast.error(bulkError);
       return;
     }
     if (overLimit) {
@@ -442,7 +473,7 @@ export default function BulkEditor({ shop, host }: { shop: string; host: string 
       inventoryItemId: p?.inventoryItemId,
     };
     if (applyVendor) {
-      u.vendor = vendor;
+      u.vendor = vendor.trim();
       u.prevVendor = p?.vendor ?? '';
     }
     if (applyPrice) {
@@ -450,7 +481,7 @@ export default function BulkEditor({ shop, host }: { shop: string; host: string 
       u.prevPrice = money(p?.price);
     }
     if (applyQuantity) {
-      u.quantity = parseInt(quantity, 10);
+      u.quantity = parseInt(quantity.trim(), 10);
       u.prevQuantity = typeof p?.inventoryQuantity === 'number' ? p.inventoryQuantity : (p?.totalInventory ?? 0);
     }
     return u;
@@ -458,6 +489,10 @@ export default function BulkEditor({ shop, host }: { shop: string; host: string 
 
   const handleApply = async () => {
     if (selectedProducts.length === 0 || noFieldSelected) return;
+    if (bulkError) {
+      toast.error(bulkError);
+      return;
+    }
     if (overLimit) {
       toast.error(
         `Your ${planInfo?.planName ?? 'Free'} plan is limited to ${productLimit} products. Upgrade to edit more.`,
@@ -883,7 +918,7 @@ export default function BulkEditor({ shop, host }: { shop: string; host: string 
   // ---- Billing gate -------------------------------------------------------
   if (planLoading) {
     return (
-      <main className="flex min-h-screen flex-col items-center justify-center gap-3 bg-background text-foreground">
+      <main className="flex min-h-screen flex-col items-center justify-center gap-3 bg-background text-foreground" role="status">
         <Loader2 className="h-8 w-8 animate-spin text-primary" />
         <p className="text-sm text-muted-foreground">Checking your subscription…</p>
       </main>
@@ -944,7 +979,7 @@ export default function BulkEditor({ shop, host }: { shop: string; host: string 
               </p>
             </div>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             {planInfo ? (
               <Badge
                 variant={isFree ? 'secondary' : 'default'}
@@ -973,14 +1008,14 @@ export default function BulkEditor({ shop, host }: { shop: string; host: string 
                 <Crown className="h-4 w-4" /> Manage plan
               </Button>
             )}
-            <Button variant="outline" onClick={exportCsv} disabled={loading} className="gap-1.5">
+            <Button variant="outline" size="sm" onClick={exportCsv} disabled={loading} className="gap-1.5">
               <Download className="h-4 w-4" /> Export CSV
             </Button>
-            <Button variant="outline" onClick={openHistory} className="gap-1.5">
+            <Button variant="outline" size="sm" onClick={openHistory} className="gap-1.5">
               <History className="h-4 w-4" /> History
             </Button>
-            <Button variant="outline" onClick={loadProducts} disabled={loading || applying || categorizing || enhancing || runningAll}>
-              {loading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <RefreshCw className="mr-2 h-4 w-4" />}
+            <Button variant="outline" size="sm" onClick={loadProducts} disabled={loading || applying || categorizing || enhancing || runningAll} className="gap-1.5">
+              {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
               Refresh
             </Button>
           </div>
@@ -991,7 +1026,7 @@ export default function BulkEditor({ shop, host }: { shop: string; host: string 
           <Card className="overflow-hidden p-0 shadow-sm">
             {/* Search + filter banner */}
             <div className="flex flex-wrap items-center gap-2 border-b border-border bg-card px-3 py-3">
-              <Select value={statusFilter} onValueChange={(v) => setStatusFilter(v as any)}>
+              <Select value={statusFilter} onValueChange={(v) => updateStatusFilter(v as typeof statusFilter)}>
                 <SelectTrigger className="h-10 w-[120px] shrink-0">
                   <SelectValue placeholder="All" />
                 </SelectTrigger>
@@ -1006,14 +1041,14 @@ export default function BulkEditor({ shop, host }: { shop: string; host: string 
                 <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
                 <Input
                   value={search}
-                  onChange={(e) => setSearch(e?.target?.value ?? '')}
+                  onChange={(e) => updateSearch(e?.target?.value ?? '')}
                   placeholder="Search by title, vendor, type or category"
                   className="h-10 pl-9"
                 />
                 {search ? (
                   <button
                     type="button"
-                    onClick={() => setSearch('')}
+                    onClick={() => updateSearch('')}
                     aria-label="Clear search"
                     className="absolute right-2 top-1/2 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded text-muted-foreground hover:bg-secondary"
                   >
@@ -1039,7 +1074,7 @@ export default function BulkEditor({ shop, host }: { shop: string; host: string 
 
             <div className="max-h-[600px] overflow-y-auto">
               {loading ? (
-                <div className="flex flex-col items-center justify-center gap-3 py-20">
+                <div className="flex flex-col items-center justify-center gap-3 py-20" role="status">
                   <Loader2 className="h-7 w-7 animate-spin text-primary" />
                   <p className="text-sm text-muted-foreground">Loading products…</p>
                 </div>
@@ -1064,8 +1099,8 @@ export default function BulkEditor({ shop, host }: { shop: string; host: string 
                     variant="outline"
                     size="sm"
                     onClick={() => {
-                      setSearch('');
-                      setStatusFilter('all');
+                      updateSearch('');
+                      updateStatusFilter('all');
                     }}
                   >
                     Clear filters
@@ -1112,7 +1147,7 @@ export default function BulkEditor({ shop, host }: { shop: string; host: string 
                             {p?.category ? (
                               <span className="truncate text-muted-foreground">{p.category}</span>
                             ) : (
-                              <span className="truncate italic text-amber-600">No category</span>
+                              <span className="truncate italic text-amber-600 dark:text-amber-400">No category</span>
                             )}
                           </p>
                         </div>
@@ -1269,7 +1304,7 @@ export default function BulkEditor({ shop, host }: { shop: string; host: string 
               </div>
 
               {overLimit ? (
-                <div className="flex items-start gap-2 rounded-md border border-amber-300 bg-amber-50 p-3 text-xs text-amber-800">
+                <div className="flex items-start gap-2 rounded-md border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-100">
                   <Lock className="mt-0.5 h-4 w-4 shrink-0" />
                   <div className="space-y-1.5">
                     <p>
@@ -1284,6 +1319,12 @@ export default function BulkEditor({ shop, host }: { shop: string; host: string 
                 </div>
               ) : null}
 
+              {bulkError && !noFieldSelected ? (
+                <p role="alert" className="text-xs text-destructive">
+                  {bulkError}
+                </p>
+              ) : null}
+
               <div className="space-y-2 pt-2">
                 <Button
                   onClick={handlePreview}
@@ -1296,7 +1337,7 @@ export default function BulkEditor({ shop, host }: { shop: string; host: string 
                 <Button
                   onClick={handleApply}
                   className="w-full"
-                  disabled={applying || loading || categorizing || enhancing || runningAll || selected.size === 0 || noFieldSelected || overLimit}
+                  disabled={applying || loading || categorizing || enhancing || runningAll || selected.size === 0 || noFieldSelected || !!bulkError || overLimit}
                 >
                   {applying ? (
                     <Loader2 className="mr-2 h-4 w-4 animate-spin" />
@@ -1343,7 +1384,7 @@ export default function BulkEditor({ shop, host }: { shop: string; host: string 
               </div>
 
               {overLimit ? (
-                <div className="flex items-start gap-2 rounded-md border border-amber-300 bg-amber-50 p-3 text-xs text-amber-800">
+                <div className="flex items-start gap-2 rounded-md border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-100">
                   <Lock className="mt-0.5 h-4 w-4 shrink-0" />
                   <div className="space-y-1.5">
                     <p>
@@ -1489,11 +1530,16 @@ export default function BulkEditor({ shop, host }: { shop: string; host: string 
 
       {/* Preview modal */}
       {showPreview ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="preview-title"
+        >
           <Card className="flex max-h-[85vh] w-full max-w-2xl flex-col overflow-hidden p-0 shadow-2xl">
             <div className="flex items-center justify-between border-b border-border px-5 py-4">
-              <h3 className="font-display text-lg font-semibold">Preview changes</h3>
-              <Button variant="ghost" size="icon" onClick={() => setShowPreview(false)}>
+              <h3 id="preview-title" className="font-display text-lg font-semibold">Preview changes</h3>
+              <Button variant="ghost" size="icon" aria-label="Close preview" onClick={() => setShowPreview(false)}>
                 <X className="h-4 w-4" />
               </Button>
             </div>
@@ -1554,22 +1600,27 @@ export default function BulkEditor({ shop, host }: { shop: string; host: string 
 
       {/* History modal */}
       {showHistory ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="history-title"
+        >
           <Card className="flex max-h-[85vh] w-full max-w-2xl flex-col overflow-hidden p-0 shadow-2xl">
             <div className="flex items-center justify-between border-b border-border px-5 py-4">
               <div>
-                <h3 className="font-display text-lg font-semibold">Edit history</h3>
+                <h3 id="history-title" className="font-display text-lg font-semibold">Edit history</h3>
                 <p className="text-xs text-muted-foreground">
                   Restore reverts the whole product to its original state (before AI edits).
                 </p>
               </div>
-              <Button variant="ghost" size="icon" onClick={() => setShowHistory(false)}>
+              <Button variant="ghost" size="icon" aria-label="Close history" onClick={() => setShowHistory(false)}>
                 <X className="h-4 w-4" />
               </Button>
             </div>
             <div className="flex-1 overflow-y-auto px-5 py-3">
               {historyLoading ? (
-                <div className="flex flex-col items-center justify-center gap-3 py-16">
+                <div className="flex flex-col items-center justify-center gap-3 py-16" role="status">
                   <Loader2 className="h-6 w-6 animate-spin text-primary" />
                   <p className="text-sm text-muted-foreground">Loading history…</p>
                 </div>
@@ -1620,7 +1671,7 @@ export default function BulkEditor({ shop, host }: { shop: string; host: string 
                     return groups.map((g) => (
                       <li key={g.productId} className="flex items-start gap-3 py-3">
                         {g.anySuccess ? (
-                          <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-600" />
+                          <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
                         ) : (
                           <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-destructive" />
                         )}

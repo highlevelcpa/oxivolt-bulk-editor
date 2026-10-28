@@ -142,8 +142,12 @@ export default function ManagePlan({ shop, host }: { shop: string; host: string 
 
   if (loading) {
     return (
-      <main className="flex min-h-screen items-center justify-center bg-background text-foreground">
-        <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+      <main
+        className="flex min-h-screen flex-col items-center justify-center gap-3 bg-background text-foreground"
+        role="status"
+      >
+        <Loader2 className="h-8 w-8 animate-spin text-primary" />
+        <p className="text-sm text-muted-foreground">Loading your plan…</p>
       </main>
     );
   }
