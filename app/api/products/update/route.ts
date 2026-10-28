@@ -1,3 +1,4 @@
+import { randomUUID } from 'crypto';
 import { NextRequest, NextResponse } from 'next/server';
 import { getBearerToken, verifySessionToken, shopifyGraphQL } from '@/lib/shopify';
 import { getWorkingAccessToken, ReauthRequiredError } from '@/lib/access-token';
@@ -39,9 +40,10 @@ const INV_ITEM_UPDATE = `
   }
 `;
 
+// `@idempotent(key:)` is optional on 2026-01 and required for inventoryActivate on 2026-04.
 const INV_ACTIVATE = `
-  mutation InvActivate($inventoryItemId: ID!, $locationId: ID!) {
-    inventoryActivate(inventoryItemId: $inventoryItemId, locationId: $locationId) {
+  mutation InvActivate($inventoryItemId: ID!, $locationId: ID!, $idempotencyKey: String!) {
+    inventoryActivate(inventoryItemId: $inventoryItemId, locationId: $locationId) @idempotent(key: $idempotencyKey) {
       inventoryLevel { id }
       userErrors { field message }
     }
@@ -207,6 +209,7 @@ export async function POST(req: NextRequest) {
           await shopifyGraphQL(shop, accessToken, INV_ACTIVATE, {
             inventoryItemId: u.inventoryItemId,
             locationId,
+            idempotencyKey: randomUUID(),
           }).catch(() => null);
           // Set the available quantity (absolute value, not a relative adjustment).
           // See lib/inventory.ts for the compare-and-swap / idempotency handling.

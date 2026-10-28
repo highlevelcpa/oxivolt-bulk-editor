@@ -287,7 +287,10 @@ test('updates multiple selected products, each with its own inventory item at th
   });
   // Tracking + activation happen per item, before the set, with the same IDs.
   assert.deepEqual(callsOf('invItemUpdate').map((c) => c.variables), [1, 2, 3].map((n) => ({ id: `gid://shopify/InventoryItem/${n}`, input: { tracked: true } })));
-  assert.deepEqual(callsOf('invActivate').map((c) => c.variables), [1, 2, 3].map((n) => ({ inventoryItemId: `gid://shopify/InventoryItem/${n}`, locationId: LOCATION_ID })));
+  assert.deepEqual(
+    callsOf('invActivate').map((c) => ({ ...c.variables, idempotencyKey: typeof c.variables.idempotencyKey })),
+    [1, 2, 3].map((n) => ({ inventoryItemId: `gid://shopify/InventoryItem/${n}`, locationId: LOCATION_ID, idempotencyKey: 'string' })),
+  );
   assert.deepEqual(usageIncrements, [3]);
 });
 
@@ -454,6 +457,18 @@ test('each inventory mutation gets its own idempotency key', async () => {
   assert.equal(keys.length, 3);
   keys.forEach((k) => assert.match(k, UUID_RE));
   assert.equal(new Set(keys).size, 3);
+});
+
+test('inventoryActivate carries @idempotent with a fresh UUID key per call (required on 2026-04)', async () => {
+  await postUpdate([1, 2].map((n) => product(n, { quantity: 5 })));
+  const activates = callsOf('invActivate');
+  assert.equal(activates.length, 2);
+  for (const c of activates) {
+    assert.match(c.query, /inventoryActivate\(inventoryItemId: \$inventoryItemId, locationId: \$locationId\)\s*@idempotent\(key: \$idempotencyKey\)/);
+    assert.match(c.query, /\$idempotencyKey: String!/);
+    assert.match(c.variables.idempotencyKey, UUID_RE);
+  }
+  assert.notEqual(activates[0].variables.idempotencyKey, activates[1].variables.idempotencyKey);
 });
 
 test('CHANGE_FROM_QUANTITY_STALE user error is reported as a failure', async () => {
