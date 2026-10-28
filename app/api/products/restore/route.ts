@@ -3,7 +3,7 @@ import { getBearerToken, verifySessionToken, shopifyGraphQL } from '@/lib/shopif
 import { getWorkingAccessToken, ReauthRequiredError } from '@/lib/access-token';
 import { requireActivePlan } from '@/lib/billing-guard';
 import { prisma } from '@/lib/db';
-import { INV_SET_QUANTITIES, inventorySetVariables } from '@/lib/inventory';
+import { conflictMessage, revertQuantityGuarded } from '@/lib/inventory';
 
 export const dynamic = 'force-dynamic';
 
@@ -79,6 +79,17 @@ export async function POST(req: NextRequest) {
     // Merge: keep the EARLIEST value for each field = the pristine original.
     const merged: Record<string, any> = {};
     const has = (k: string) => Object.prototype.hasOwnProperty.call(merged, k);
+    // The quantity Shopify should hold right now = the value written by the NEWEST open
+    // edit that touched quantity. Used as the compare-and-swap guard below.
+    let lastWrittenQuantity: number | null = null;
+    for (const e of entries) {
+      try {
+        const q = JSON.parse(e.changes ?? '{}')?.quantity;
+        if (typeof q === 'number') lastWrittenQuantity = q;
+      } catch {
+        /* ignore unreadable rows */
+      }
+    }
     for (const e of revertible) {
       let prev: any;
       try {
@@ -126,6 +137,39 @@ export async function POST(req: NextRequest) {
 
     const errorParts: string[] = [];
 
+    // 0) Quantity / inventory FIRST, guarded by compare-and-swap: only restore if Shopify
+    //    still holds the value our newest edit wrote. On conflict nothing at all is written.
+    if (merged?.quantity !== null && merged?.quantity !== undefined && merged?.inventoryItemId) {
+      let locationId: string | null = merged?.locationId ?? null;
+      if (!locationId) {
+        try {
+          const locData: any = await shopifyGraphQL(shop, accessToken, LOCATION_QUERY);
+          locationId = locData?.locations?.edges?.[0]?.node?.id ?? null;
+        } catch {
+          locationId = null;
+        }
+      }
+      if (!locationId) {
+        return NextResponse.json({ success: false, error: 'quantity: no active store location found' }, { status: 200 });
+      }
+      const inv = await revertQuantityGuarded(shop, accessToken, {
+        inventoryItemId: merged.inventoryItemId,
+        locationId,
+        target: Number(merged.quantity),
+        expected: lastWrittenQuantity,
+        acceptCurrent: typeof body?.acceptCurrentQuantity === 'number' ? body.acceptCurrentQuantity : null,
+      });
+      if (!inv.ok && 'conflict' in inv) {
+        return NextResponse.json(
+          { success: false, error: 'inventory_conflict', message: conflictMessage(inv.conflict), conflict: inv.conflict },
+          { status: 409 },
+        );
+      }
+      if (!inv.ok) {
+        return NextResponse.json({ success: false, error: inv.error }, { status: 200 });
+      }
+    }
+
     // 1) Product-level fields.
     const productInput: Record<string, any> = { id: productId };
     if ('title' in merged) productInput.title = merged.title;
@@ -164,36 +208,6 @@ export async function POST(req: NextRequest) {
         if (err) errorParts.push(`price: ${err}`);
       } catch (e: any) {
         errorParts.push(`price: ${e?.message ?? 'error'}`);
-      }
-    }
-
-    // 3) Quantity / inventory.
-    if (merged?.quantity !== null && merged?.quantity !== undefined && merged?.inventoryItemId) {
-      let locationId: string | null = merged?.locationId ?? null;
-      if (!locationId) {
-        try {
-          const locData: any = await shopifyGraphQL(shop, accessToken, LOCATION_QUERY);
-          locationId = locData?.locations?.edges?.[0]?.node?.id ?? null;
-        } catch {
-          locationId = null;
-        }
-      }
-      if (!locationId) {
-        errorParts.push('quantity: no active store location found');
-      } else {
-        try {
-          // Absolute set back to the original value (see lib/inventory.ts).
-          const d: any = await shopifyGraphQL(
-            shop,
-            accessToken,
-            INV_SET_QUANTITIES,
-            inventorySetVariables(merged.inventoryItemId, locationId, Number(merged.quantity)),
-          );
-          const err = firstError(d?.inventorySetQuantities?.userErrors);
-          if (err) errorParts.push(`quantity: ${err}`);
-        } catch (e: any) {
-          errorParts.push(`quantity: ${e?.message ?? 'error'}`);
-        }
       }
     }
 

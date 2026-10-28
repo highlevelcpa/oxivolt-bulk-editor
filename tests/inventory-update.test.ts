@@ -23,7 +23,7 @@ process.env.SHOPIFY_API_SECRET = API_SECRET;
 // Shopify Admin API 2026-04+ rules for inventorySetQuantities.
 // API_VERSION explicitly targets 2026-04, so these are the rules Shopify enforces:
 //   - `ignoreCompareQuantity` / `compareQuantity` removed (deprecated in 2026-01)
-//   - every quantity must include `changeFromQuantity` (null = skip the CAS check)
+//   - every quantity must include `changeFromQuantity` (null = skip the CAS check; a number = CAS guard)
 //   - `@idempotent(key:)` directive required (optional in 2026-01)
 // ---------------------------------------------------------------------------
 const SET_INPUT_FIELDS_2026_04 = ['name', 'reason', 'referenceDocumentUri', 'quantities'];
@@ -77,11 +77,15 @@ let editLogs: any[] = [];
 let usageIncrements: number[] = [];
 let editLogRows: any[] = [];
 let locationsResponse: any = { locations: { edges: [{ node: { id: LOCATION_ID } }] } };
+// Simulated Shopify `available` quantity per inventory item at LOCATION_ID (default 7).
+let levels: Record<string, number> = {};
+const levelOf = (id: string) => (id in levels ? levels[id] : 7);
 
 function opName(query: string): string {
   if (query.includes('shop { id }')) return 'probe';
   if (query.includes('currentAppInstallation')) return 'billing';
   if (query.includes('locations(')) return 'locations';
+  if (query.includes('inventoryLevel(locationId')) return 'invLevel';
   if (query.includes('productUpdate(')) return 'productUpdate';
   if (query.includes('productVariantsBulkUpdate(')) return 'variantPrice';
   if (query.includes('inventoryItemUpdate(')) return 'invItemUpdate';
@@ -117,9 +121,25 @@ function defaultHandler(op: string, vars: any, query = ''): any {
       return { data: { inventoryItemUpdate: { inventoryItem: { id: vars?.id, tracked: true }, userErrors: [] } } };
     case 'invActivate':
       return { data: { inventoryActivate: { inventoryLevel: { id: 'gid://shopify/InventoryLevel/1' }, userErrors: [] } } };
+    case 'invLevel':
+      return {
+        data: {
+          inventoryItem: {
+            id: vars?.inventoryItemId,
+            inventoryLevel: { id: 'gid://shopify/InventoryLevel/1', quantities: [{ name: 'available', quantity: levelOf(vars?.inventoryItemId) }] },
+          },
+        },
+      };
     case 'invSet': {
       const errors = validateIdempotency(query, vars) ?? validateSetInput2026_04(vars?.input);
       if (errors) return { errors };
+      // Shopify compare-and-swap semantics.
+      for (const q of vars.input.quantities) {
+        if (q.changeFromQuantity !== null && q.changeFromQuantity !== levelOf(q.inventoryItemId)) {
+          return { data: { inventorySetQuantities: { userErrors: [{ code: 'CHANGE_FROM_QUANTITY_STALE', field: ['input', 'quantities', '0', 'changeFromQuantity'], message: 'The quantity has changed since it was last read.' }] } } };
+        }
+      }
+      for (const q of vars.input.quantities) levels[q.inventoryItemId] = q.quantity;
       return { data: { inventorySetQuantities: { userErrors: [] } } };
     }
     default:
@@ -185,6 +205,7 @@ beforeEach(() => {
   usageIncrements = [];
   editLogRows = [];
   locationsResponse = { locations: { edges: [{ node: { id: LOCATION_ID } }] } };
+  levels = {};
 });
 
 function sessionToken() {
@@ -234,7 +255,7 @@ test('sets an absolute available quantity with a 2026-01/2026-04-valid payload',
     input: {
       name: 'available',
       reason: 'correction',
-      quantities: [{ inventoryItemId: 'gid://shopify/InventoryItem/1', locationId: LOCATION_ID, quantity: 200, changeFromQuantity: null }],
+      quantities: [{ inventoryItemId: 'gid://shopify/InventoryItem/1', locationId: LOCATION_ID, quantity: 200, changeFromQuantity: 7 }],
     },
   });
   assert.match(idempotencyKey, UUID_RE);
@@ -313,7 +334,7 @@ test('one failing product does not mark the others as failed (and vice versa)', 
 test('untracked items are switched to tracked and activated before the quantity is set', async () => {
   await postUpdate([product(1, { quantity: 10 })]);
   const order = calls.map((c) => opName(c.query)).filter((o) => o.startsWith('inv'));
-  assert.deepEqual(order, ['invItemUpdate', 'invActivate', 'invSet']);
+  assert.deepEqual(order, ['invItemUpdate', 'invActivate', 'invLevel', 'invSet']);
 });
 
 test('unsupported inventory state rejected by Shopify is reported as a failure, not success', async () => {
@@ -420,15 +441,30 @@ test('quantity omitted (null) does not trigger any inventory call', async () => 
 // ---------------------------------------------------------------------------
 // 7. Compare-and-set handling
 // ---------------------------------------------------------------------------
-test('compare check is explicitly skipped (absolute set) with changeFromQuantity: null, never the deprecated fields', async () => {
+test('CAS guard is the server-read location quantity, never the client prevQuantity or deprecated fields', async () => {
+  levels['gid://shopify/InventoryItem/1'] = 4;
   await postUpdate([product(1, { quantity: 200, prevQuantity: 999 })]);
   const input = callsOf('invSet')[0].variables.input;
   assert.ok(!('ignoreCompareQuantity' in input));
   for (const q of input.quantities) {
-    assert.ok('changeFromQuantity' in q);
-    assert.equal(q.changeFromQuantity, null); // not the client-side prevQuantity (999)
+    assert.equal(q.changeFromQuantity, 4); // read from Shopify, not the client-side 999
     assert.ok(!('compareQuantity' in q));
   }
+  // The Undo snapshot is the value actually overwritten at this location.
+  assert.equal(JSON.parse(editLogs[0].previousValues).quantity, 4);
+});
+
+test('a sale between read and write (CAS stale) is reported and no Undo snapshot is stored', async () => {
+  overrides.invLevel = (vars) => {
+    const r = { data: { inventoryItem: { id: vars.inventoryItemId, inventoryLevel: { id: 'x', quantities: [{ name: 'available', quantity: 7 }] } } } };
+    levels[vars.inventoryItemId] = 6; // a unit sells right after the read
+    return r;
+  };
+  const { json } = await postUpdate([product(1, { quantity: 50 })]);
+  assert.equal(json.results[0].success, false);
+  assert.match(json.results[0].error, /stock changed while saving/);
+  assert.equal(levels['gid://shopify/InventoryItem/1'], 6); // the sale is preserved
+  assert.ok(!('quantity' in JSON.parse(editLogs[0].previousValues)));
 });
 
 test('the previous payload (ignoreCompareQuantity) is rejected by the 2026-04 schema mock', () => {
@@ -476,7 +512,7 @@ test('CHANGE_FROM_QUANTITY_STALE user error is reported as a failure', async () 
   });
   const { json } = await postUpdate([product(1, { quantity: 10, prevQuantity: 4 })]);
   assert.equal(json.results[0].success, false);
-  assert.equal(json.results[0].error, 'quantity: The quantity has changed since it was last read.');
+  assert.equal(json.results[0].error, 'quantity: stock changed while saving (e.g. a sale); not applied, please retry');
   assert.equal(editLogs[0].success, false);
   assert.deepEqual(usageIncrements, []);
 });
@@ -486,7 +522,9 @@ test('retrying the same request sends the same absolute value (no cumulative adj
   await postUpdate([product(1, { quantity: 200 })]);
   const sets = callsOf('invSet');
   assert.equal(sets.length, 2);
-  assert.deepEqual(sets[0].variables.input, sets[1].variables.input);
+  // Same absolute target both times; the CAS guard reflects the freshly read value (7, then 200).
+  assert.deepEqual(sets.map((c) => c.variables.input.quantities[0].quantity), [200, 200]);
+  assert.deepEqual(sets.map((c) => c.variables.input.quantities[0].changeFromQuantity), [7, 200]);
   // A retry is a new logical operation, so it gets a new idempotency key.
   assert.notEqual(sets[0].variables.idempotencyKey, sets[1].variables.idempotencyKey);
 });
@@ -529,8 +567,10 @@ test('a quantity failure does not hide a successful price change (partial result
 test('undo restores the previous absolute quantity with a 2026-01/2026-04-valid payload', async () => {
   editLogRows = [{
     id: 'log1', shop: SHOP, productId: 'gid://shopify/Product/1', success: true, undone: false,
+    changes: JSON.stringify({ quantity: 200 }),
     previousValues: JSON.stringify({ quantity: 7, inventoryItemId: 'gid://shopify/InventoryItem/1', locationId: LOCATION_ID }),
   }];
+  levels['gid://shopify/InventoryItem/1'] = 200;
   const res = await undoPOST(request('/api/products/undo', { editLogId: 'log1' }));
   assert.deepEqual(await res.json(), { success: true });
   const call = callsOf('invSet')[0];
@@ -538,15 +578,16 @@ test('undo restores the previous absolute quantity with a 2026-01/2026-04-valid 
   assert.equal(validateIdempotency(call.query, call.variables), null);
   assert.deepEqual(call.variables.input, {
     name: 'available', reason: 'correction',
-    quantities: [{ inventoryItemId: 'gid://shopify/InventoryItem/1', locationId: LOCATION_ID, quantity: 7, changeFromQuantity: null }],
+    quantities: [{ inventoryItemId: 'gid://shopify/InventoryItem/1', locationId: LOCATION_ID, quantity: 7, changeFromQuantity: 200 }],
   });
 });
 
 test('restore resets the original absolute quantity with a 2026-01/2026-04-valid payload', async () => {
   editLogRows = [
-    { id: 'a', shop: SHOP, productId: 'gid://shopify/Product/1', success: true, undone: false, previousValues: JSON.stringify({ quantity: 3, inventoryItemId: 'gid://shopify/InventoryItem/1', locationId: LOCATION_ID }) },
-    { id: 'b', shop: SHOP, productId: 'gid://shopify/Product/1', success: true, undone: false, previousValues: JSON.stringify({ quantity: 200, inventoryItemId: 'gid://shopify/InventoryItem/1', locationId: LOCATION_ID }) },
+    { id: 'a', shop: SHOP, productId: 'gid://shopify/Product/1', success: true, undone: false, changes: JSON.stringify({ quantity: 200 }), previousValues: JSON.stringify({ quantity: 3, inventoryItemId: 'gid://shopify/InventoryItem/1', locationId: LOCATION_ID }) },
+    { id: 'b', shop: SHOP, productId: 'gid://shopify/Product/1', success: true, undone: false, changes: JSON.stringify({ quantity: 80 }), previousValues: JSON.stringify({ quantity: 200, inventoryItemId: 'gid://shopify/InventoryItem/1', locationId: LOCATION_ID }) },
   ];
+  levels['gid://shopify/InventoryItem/1'] = 80;
   const res = await restorePOST(request('/api/products/restore', { productId: 'gid://shopify/Product/1' }));
   const body = await res.json();
   assert.equal(body.success, true);
@@ -555,15 +596,97 @@ test('restore resets the original absolute quantity with a 2026-01/2026-04-valid
   assert.equal(validateSetInput2026_04(sets[0].variables.input), null);
   assert.equal(validateIdempotency(sets[0].query, sets[0].variables), null);
   assert.equal(sets[0].variables.input.quantities[0].quantity, 3);
-  assert.equal(sets[0].variables.input.quantities[0].changeFromQuantity, null);
+  assert.equal(sets[0].variables.input.quantities[0].changeFromQuantity, 80); // newest edit's written value
 });
 
 test('undo reports Shopify rejection instead of success', async () => {
   editLogRows = [{
     id: 'log2', shop: SHOP, productId: 'gid://shopify/Product/1', success: true, undone: false,
+    changes: JSON.stringify({ quantity: 20 }),
     previousValues: JSON.stringify({ quantity: 7, inventoryItemId: 'gid://shopify/InventoryItem/1', locationId: LOCATION_ID }),
   }];
+  levels['gid://shopify/InventoryItem/1'] = 20;
   overrides.invSet = () => ({ data: { inventorySetQuantities: { userErrors: [{ field: null, message: 'rejected' }] } } });
   const res = await undoPOST(request('/api/products/undo', { editLogId: 'log2' }));
   assert.deepEqual(await res.json(), { success: false, error: 'quantity: rejected' });
+});
+
+// ---------------------------------------------------------------------------
+// Undo / Restore never overwrite newer stock changes (compare-and-swap)
+// ---------------------------------------------------------------------------
+const qtyRow = (id: string, written: number, prev: number, extra: Record<string, any> = {}) => ({
+  id, shop: SHOP, productId: 'gid://shopify/Product/1', success: true, undone: false,
+  changes: JSON.stringify({ quantity: written, ...(extra.changes ?? {}) }),
+  previousValues: JSON.stringify({ quantity: prev, inventoryItemId: 'gid://shopify/InventoryItem/1', locationId: LOCATION_ID, ...(extra.prev ?? {}) }),
+});
+
+test('undo after a sale returns 409 inventory_conflict and writes NOTHING (not even price)', async () => {
+  editLogRows = [qtyRow('c1', 15, 10, { changes: { price: '9.00' }, prev: { price: '12.00', variantId: 'gid://shopify/ProductVariant/1' } })];
+  levels['gid://shopify/InventoryItem/1'] = 13; // 2 units sold after the edit
+  const res = await undoPOST(request('/api/products/undo', { editLogId: 'c1' }));
+  assert.equal(res.status, 409);
+  const body = await res.json();
+  assert.equal(body.error, 'inventory_conflict');
+  assert.deepEqual(
+    { expected: body.conflict.expected, current: body.conflict.current, target: body.conflict.target },
+    { expected: 15, current: 13, target: 10 },
+  );
+  assert.match(body.message, /Nothing was restored/);
+  assert.equal(callsOf('invSet').length, 0);
+  assert.equal(callsOf('variantPrice').length, 0);
+  assert.equal(callsOf('productUpdate').length, 0);
+  assert.equal(levels['gid://shopify/InventoryItem/1'], 13);
+});
+
+test('undo with explicit acceptCurrentQuantity overwrites only the confirmed value (still CAS-guarded)', async () => {
+  editLogRows = [qtyRow('c2', 15, 10)];
+  levels['gid://shopify/InventoryItem/1'] = 13;
+  const ok = await undoPOST(request('/api/products/undo', { editLogId: 'c2', acceptCurrentQuantity: 13 }));
+  assert.deepEqual(await ok.json(), { success: true });
+  assert.equal(callsOf('invSet')[0].variables.input.quantities[0].changeFromQuantity, 13);
+  assert.equal(levels['gid://shopify/InventoryItem/1'], 10);
+
+  // Stock moved again after the merchant confirmed 13 -> conflict again, nothing written.
+  calls = [];
+  editLogRows = [qtyRow('c3', 15, 10)];
+  levels['gid://shopify/InventoryItem/1'] = 12;
+  const again = await undoPOST(request('/api/products/undo', { editLogId: 'c3', acceptCurrentQuantity: 13 }));
+  assert.equal(again.status, 409);
+  assert.equal(callsOf('invSet').length, 0);
+});
+
+test('a sale racing the undo write (CAS stale) is a conflict, not a success', async () => {
+  editLogRows = [qtyRow('c4', 15, 10)];
+  levels['gid://shopify/InventoryItem/1'] = 15;
+  overrides.invSet = () => ({ data: { inventorySetQuantities: { userErrors: [{ code: 'CHANGE_FROM_QUANTITY_STALE', field: null, message: 'stale' }] } } });
+  const res = await undoPOST(request('/api/products/undo', { editLogId: 'c4' }));
+  assert.equal(res.status, 409);
+  assert.equal((await res.json()).conflict.current, null);
+});
+
+test('undo is a no-op write when stock already equals the target (safe retry after partial undo)', async () => {
+  editLogRows = [qtyRow('c5', 15, 10)];
+  levels['gid://shopify/InventoryItem/1'] = 10;
+  const res = await undoPOST(request('/api/products/undo', { editLogId: 'c5' }));
+  assert.deepEqual(await res.json(), { success: true });
+  assert.equal(callsOf('invSet').length, 0);
+});
+
+test('legacy edit rows without a recorded written quantity require explicit confirmation', async () => {
+  editLogRows = [{ ...qtyRow('c6', 0, 10), changes: '{}' }];
+  levels['gid://shopify/InventoryItem/1'] = 15;
+  const res = await undoPOST(request('/api/products/undo', { editLogId: 'c6' }));
+  assert.equal(res.status, 409);
+  assert.equal((await res.json()).conflict.expected, null);
+});
+
+test('restore after a sale returns 409 and writes nothing', async () => {
+  editLogRows = [qtyRow('r1', 200, 3), qtyRow('r2', 80, 200)];
+  levels['gid://shopify/InventoryItem/1'] = 79;
+  const res = await restorePOST(request('/api/products/restore', { productId: 'gid://shopify/Product/1' }));
+  assert.equal(res.status, 409);
+  const body = await res.json();
+  assert.deepEqual([body.conflict.expected, body.conflict.current, body.conflict.target], [80, 79, 3]);
+  assert.equal(callsOf('invSet').length, 0);
+  assert.equal(callsOf('productUpdate').length, 0);
 });
