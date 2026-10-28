@@ -4,7 +4,13 @@ import { getBearerToken, verifySessionToken, shopifyGraphQL } from '@/lib/shopif
 import { getWorkingAccessToken, ReauthRequiredError } from '@/lib/access-token';
 import { limitExceededResponse, requireActivePlan } from '@/lib/billing-guard';
 import { prisma } from '@/lib/db';
-import { INV_SET_QUANTITIES, inventorySetVariables } from '@/lib/inventory';
+import {
+  INV_SET_QUANTITIES,
+  QUANTITY_SCOPE_LOCATION,
+  inventorySetVariables,
+  isStaleQuantityError,
+  readAvailable,
+} from '@/lib/inventory';
 import { incrementUsage } from '@/lib/usage';
 
 export const dynamic = 'force-dynamic';
@@ -211,21 +217,32 @@ export async function POST(req: NextRequest) {
             locationId,
             idempotencyKey: randomUUID(),
           }).catch(() => null);
-          // Set the available quantity (absolute value, not a relative adjustment).
-          // See lib/inventory.ts for the compare-and-swap / idempotency handling.
-          const d: any = await shopifyGraphQL(
-            shop,
-            accessToken,
-            INV_SET_QUANTITIES,
-            inventorySetVariables(u.inventoryItemId, locationId, Number(u.quantity)),
-          );
-          const err = firstError(d?.inventorySetQuantities?.userErrors);
-          if (err) errorParts.push(`quantity: ${err}`);
-          else {
-            changeSummary.quantity = Number(u.quantity);
-            if (u?.prevQuantity !== null && u?.prevQuantity !== undefined) previous.quantity = Number(u.prevQuantity);
-            previous.inventoryItemId = u?.inventoryItemId ?? null;
-            previous.locationId = locationId;
+          // Read the real `available` quantity at THIS location. It is both the CAS guard
+          // for the write and the authoritative Undo snapshot (the client's prevQuantity is
+          // the variant total across all locations and may be stale).
+          const before = await readAvailable(shop, accessToken, u.inventoryItemId, locationId);
+          if (before === null) {
+            errorParts.push('quantity: could not read current stock at the store location');
+          } else {
+            // Absolute set, guarded by changeFromQuantity (see lib/inventory.ts).
+            const d: any = await shopifyGraphQL(
+              shop,
+              accessToken,
+              INV_SET_QUANTITIES,
+              inventorySetVariables(u.inventoryItemId, locationId, Number(u.quantity), before),
+            );
+            const errs = d?.inventorySetQuantities?.userErrors;
+            const err = firstError(errs);
+            if (isStaleQuantityError(errs)) {
+              errorParts.push('quantity: stock changed while saving (e.g. a sale); not applied, please retry');
+            } else if (err) errorParts.push(`quantity: ${err}`);
+            else {
+              changeSummary.quantity = Number(u.quantity);
+              previous.quantity = before;
+              previous.inventoryItemId = u?.inventoryItemId ?? null;
+              previous.locationId = locationId;
+              previous.quantityScope = QUANTITY_SCOPE_LOCATION;
+            }
           }
         } catch (e: any) {
           errorParts.push(`quantity: ${e?.message ?? 'error'}`);

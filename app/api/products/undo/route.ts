@@ -3,7 +3,7 @@ import { getBearerToken, verifySessionToken, shopifyGraphQL } from '@/lib/shopif
 import { getWorkingAccessToken, ReauthRequiredError } from '@/lib/access-token';
 import { requireActivePlan } from '@/lib/billing-guard';
 import { prisma } from '@/lib/db';
-import { INV_SET_QUANTITIES, inventorySetVariables } from '@/lib/inventory';
+import { QUANTITY_SCOPE_LOCATION, conflictMessage, revertQuantityGuarded } from '@/lib/inventory';
 
 export const dynamic = 'force-dynamic';
 
@@ -87,6 +87,46 @@ export async function POST(req: NextRequest) {
     const productId = entry.productId;
     const errorParts: string[] = [];
 
+    // 0) Quantity / inventory FIRST, guarded by compare-and-swap: only revert if Shopify
+    //    still holds the value this edit wrote. On conflict nothing at all is written.
+    if (previous?.quantity !== null && previous?.quantity !== undefined && previous?.inventoryItemId) {
+      let locationId: string | null = previous?.locationId ?? null;
+      if (!locationId) {
+        try {
+          const locData: any = await shopifyGraphQL(shop, accessToken, LOCATION_QUERY);
+          locationId = locData?.locations?.edges?.[0]?.node?.id ?? null;
+        } catch {
+          locationId = null;
+        }
+      }
+      if (!locationId) {
+        return NextResponse.json({ success: false, error: 'quantity: no active store location found' }, { status: 200 });
+      }
+      let written: any = null;
+      try {
+        written = JSON.parse(entry.changes ?? '{}')?.quantity;
+      } catch {
+        written = null;
+      }
+      const inv = await revertQuantityGuarded(shop, accessToken, {
+        inventoryItemId: previous.inventoryItemId,
+        locationId,
+        target: Number(previous.quantity),
+        expected: typeof written === 'number' ? written : null,
+        acceptCurrent: typeof body?.acceptCurrentQuantity === 'number' ? body.acceptCurrentQuantity : null,
+        legacySnapshot: previous?.quantityScope !== QUANTITY_SCOPE_LOCATION,
+      });
+      if (!inv.ok && 'conflict' in inv) {
+        return NextResponse.json(
+          { success: false, error: 'inventory_conflict', message: conflictMessage(inv.conflict), conflict: inv.conflict },
+          { status: 409 },
+        );
+      }
+      if (!inv.ok) {
+        return NextResponse.json({ success: false, error: inv.error }, { status: 200 });
+      }
+    }
+
     // 1) Product-level fields.
     const productInput: Record<string, any> = { id: productId };
     if ('title' in previous) productInput.title = previous.title;
@@ -125,36 +165,6 @@ export async function POST(req: NextRequest) {
         if (err) errorParts.push(`price: ${err}`);
       } catch (e: any) {
         errorParts.push(`price: ${e?.message ?? 'error'}`);
-      }
-    }
-
-    // 3) Quantity / inventory.
-    if (previous?.quantity !== null && previous?.quantity !== undefined && previous?.inventoryItemId) {
-      let locationId: string | null = previous?.locationId ?? null;
-      if (!locationId) {
-        try {
-          const locData: any = await shopifyGraphQL(shop, accessToken, LOCATION_QUERY);
-          locationId = locData?.locations?.edges?.[0]?.node?.id ?? null;
-        } catch {
-          locationId = null;
-        }
-      }
-      if (!locationId) {
-        errorParts.push('quantity: no active store location found');
-      } else {
-        try {
-          // Absolute set back to the recorded value (see lib/inventory.ts).
-          const d: any = await shopifyGraphQL(
-            shop,
-            accessToken,
-            INV_SET_QUANTITIES,
-            inventorySetVariables(previous.inventoryItemId, locationId, Number(previous.quantity)),
-          );
-          const err = firstError(d?.inventorySetQuantities?.userErrors);
-          if (err) errorParts.push(`quantity: ${err}`);
-        } catch (e: any) {
-          errorParts.push(`quantity: ${e?.message ?? 'error'}`);
-        }
       }
     }
 

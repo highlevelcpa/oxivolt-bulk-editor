@@ -3,7 +3,7 @@ import { getBearerToken, verifySessionToken, shopifyGraphQL } from '@/lib/shopif
 import { getWorkingAccessToken, ReauthRequiredError } from '@/lib/access-token';
 import { requireActivePlan } from '@/lib/billing-guard';
 import { prisma } from '@/lib/db';
-import { INV_SET_QUANTITIES, inventorySetVariables } from '@/lib/inventory';
+import { QUANTITY_SCOPE_LOCATION, conflictMessage, revertQuantityGuarded } from '@/lib/inventory';
 
 export const dynamic = 'force-dynamic';
 
@@ -79,6 +79,43 @@ export async function POST(req: NextRequest) {
     // Merge: keep the EARLIEST value for each field = the pristine original.
     const merged: Record<string, any> = {};
     const has = (k: string) => Object.prototype.hasOwnProperty.call(merged, k);
+    // The quantity Shopify should hold right now = the value written by the NEWEST open
+    // edit that touched quantity. Used as the compare-and-swap guard below.
+    // Every open quantity edit must target the same inventory item AND location, otherwise
+    // that value is not comparable with the stock at the restore location.
+    let lastWrittenQuantity: number | null = null;
+    const quantityTargets = new Set<string>();
+    for (const e of entries) {
+      let q: unknown;
+      try {
+        q = JSON.parse(e.changes ?? '{}')?.quantity;
+      } catch {
+        continue; // unreadable `changes`: not a known quantity write
+      }
+      if (typeof q !== 'number') continue;
+      lastWrittenQuantity = q;
+      let p: any = null;
+      try {
+        p = JSON.parse(e.previousValues ?? '{}');
+      } catch {
+        p = null; // unknown target: counted as its own target so it can never match silently
+      }
+      quantityTargets.add(p ? `${p?.inventoryItemId ?? '?'}|${p?.locationId ?? '?'}` : `unreadable:${e.id}`);
+    }
+    // Not overridable: acceptCurrentQuantity is ignored here because no single "current"
+    // value exists to confirm against. Checked before any Shopify call.
+    if (quantityTargets.size > 1) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: 'inventory_target_mismatch',
+          message:
+            'The open edits for this product changed stock at different locations or variants, ' +
+            'so it cannot be restored automatically. Nothing was restored. Adjust stock manually in Shopify.',
+        },
+        { status: 409 },
+      );
+    }
     for (const e of revertible) {
       let prev: any;
       try {
@@ -108,6 +145,7 @@ export async function POST(req: NextRequest) {
         merged.quantity = prev.quantity;
         merged.inventoryItemId = prev.inventoryItemId;
         merged.locationId = prev.locationId;
+        merged.quantityScope = prev.quantityScope;
       }
     }
 
@@ -125,6 +163,40 @@ export async function POST(req: NextRequest) {
     if (!gate.ok) return gate.response;
 
     const errorParts: string[] = [];
+
+    // 0) Quantity / inventory FIRST, guarded by compare-and-swap: only restore if Shopify
+    //    still holds the value our newest edit wrote. On conflict nothing at all is written.
+    if (merged?.quantity !== null && merged?.quantity !== undefined && merged?.inventoryItemId) {
+      let locationId: string | null = merged?.locationId ?? null;
+      if (!locationId) {
+        try {
+          const locData: any = await shopifyGraphQL(shop, accessToken, LOCATION_QUERY);
+          locationId = locData?.locations?.edges?.[0]?.node?.id ?? null;
+        } catch {
+          locationId = null;
+        }
+      }
+      if (!locationId) {
+        return NextResponse.json({ success: false, error: 'quantity: no active store location found' }, { status: 200 });
+      }
+      const inv = await revertQuantityGuarded(shop, accessToken, {
+        inventoryItemId: merged.inventoryItemId,
+        locationId,
+        target: Number(merged.quantity),
+        expected: lastWrittenQuantity,
+        acceptCurrent: typeof body?.acceptCurrentQuantity === 'number' ? body.acceptCurrentQuantity : null,
+        legacySnapshot: merged.quantityScope !== QUANTITY_SCOPE_LOCATION,
+      });
+      if (!inv.ok && 'conflict' in inv) {
+        return NextResponse.json(
+          { success: false, error: 'inventory_conflict', message: conflictMessage(inv.conflict), conflict: inv.conflict },
+          { status: 409 },
+        );
+      }
+      if (!inv.ok) {
+        return NextResponse.json({ success: false, error: inv.error }, { status: 200 });
+      }
+    }
 
     // 1) Product-level fields.
     const productInput: Record<string, any> = { id: productId };
@@ -164,36 +236,6 @@ export async function POST(req: NextRequest) {
         if (err) errorParts.push(`price: ${err}`);
       } catch (e: any) {
         errorParts.push(`price: ${e?.message ?? 'error'}`);
-      }
-    }
-
-    // 3) Quantity / inventory.
-    if (merged?.quantity !== null && merged?.quantity !== undefined && merged?.inventoryItemId) {
-      let locationId: string | null = merged?.locationId ?? null;
-      if (!locationId) {
-        try {
-          const locData: any = await shopifyGraphQL(shop, accessToken, LOCATION_QUERY);
-          locationId = locData?.locations?.edges?.[0]?.node?.id ?? null;
-        } catch {
-          locationId = null;
-        }
-      }
-      if (!locationId) {
-        errorParts.push('quantity: no active store location found');
-      } else {
-        try {
-          // Absolute set back to the original value (see lib/inventory.ts).
-          const d: any = await shopifyGraphQL(
-            shop,
-            accessToken,
-            INV_SET_QUANTITIES,
-            inventorySetVariables(merged.inventoryItemId, locationId, Number(merged.quantity)),
-          );
-          const err = firstError(d?.inventorySetQuantities?.userErrors);
-          if (err) errorParts.push(`quantity: ${err}`);
-        } catch (e: any) {
-          errorParts.push(`quantity: ${e?.message ?? 'error'}`);
-        }
       }
     }
 

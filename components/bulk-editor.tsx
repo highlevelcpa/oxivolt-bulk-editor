@@ -793,13 +793,15 @@ export default function BulkEditor({ shop, host }: { shop: string; host: string 
     }
   };
 
-  const handleUndo = async (productId: string) => {
+  // `acceptCurrentQuantity` is only sent after the merchant explicitly confirms overwriting
+  // a newer stock value shown in the conflict toast (the server still CAS-guards it).
+  const handleUndo = async (productId: string, acceptCurrentQuantity?: number) => {
     if (!productId) return;
     setUndoingId(productId);
     try {
       const res = await authFetch('/api/products/restore', {
         method: 'POST',
-        body: JSON.stringify({ productId }),
+        body: JSON.stringify({ productId, acceptCurrentQuantity }),
       });
       const data = await res.json().catch(() => ({}));
       if (res.status === 401 && data?.error === 'reauth_required') {
@@ -807,8 +809,20 @@ export default function BulkEditor({ shop, host }: { shop: string; host: string 
         triggerReauth(shop);
         return;
       }
+      if (res.status === 409 && data?.error === 'inventory_conflict') {
+        const c = data?.conflict ?? {};
+        toast.warning(data?.message ?? 'Stock changed after this edit. Nothing was restored.', {
+          duration: 20000,
+          action:
+            typeof c?.current === 'number' && typeof c?.target === 'number'
+              ? { label: `Set stock to ${c.target} anyway`, onClick: () => handleUndo(productId, c.current) }
+              : undefined,
+        });
+        return;
+      }
       if (!res.ok || data?.success === false) {
-        toast.error(data?.error ?? 'Could not restore this product.');
+        // Coded errors (e.g. 409 inventory_target_mismatch) carry the readable text in `message`.
+        toast.error(data?.message ?? data?.error ?? 'Could not restore this product.');
         return;
       }
       toast.success('Product restored to its original state.');
