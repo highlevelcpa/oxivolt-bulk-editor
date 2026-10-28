@@ -7,7 +7,7 @@ export const API_SECRET = process.env.SHOPIFY_API_SECRET ?? '';
 export const SCOPES =
   process.env.SHOPIFY_SCOPES ??
   'read_products,write_products,read_inventory,write_inventory,read_locations';
-export const API_VERSION = '2026-01';
+export const API_VERSION = '2026-04';
 
 // ---------------------------------------------------------------------------
 // URL / host helpers

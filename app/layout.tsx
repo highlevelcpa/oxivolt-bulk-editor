@@ -37,7 +37,6 @@ export default function RootLayout({
         {/* Shopify App Bridge must load first, before any other script. */}
         <meta name="shopify-api-key" content={API_KEY} />
         <script src="https://cdn.shopify.com/shopifycloud/app-bridge.js" />
-        <script src="https://apps.abacus.ai/chatllm/appllm-lib.js" async />
       </head>
       <body className={`${dmSans.variable} ${jakartaSans.variable} ${jetbrainsMono.variable} font-sans`}>
         <ThemeProvider
