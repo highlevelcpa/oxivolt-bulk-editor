@@ -3,7 +3,7 @@ import { getBearerToken, verifySessionToken, shopifyGraphQL } from '@/lib/shopif
 import { getWorkingAccessToken, ReauthRequiredError } from '@/lib/access-token';
 import { requireActivePlan } from '@/lib/billing-guard';
 import { prisma } from '@/lib/db';
-import { conflictMessage, revertQuantityGuarded } from '@/lib/inventory';
+import { QUANTITY_SCOPE_LOCATION, conflictMessage, revertQuantityGuarded } from '@/lib/inventory';
 
 export const dynamic = 'force-dynamic';
 
@@ -114,6 +114,7 @@ export async function POST(req: NextRequest) {
         target: Number(previous.quantity),
         expected: typeof written === 'number' ? written : null,
         acceptCurrent: typeof body?.acceptCurrentQuantity === 'number' ? body.acceptCurrentQuantity : null,
+        legacySnapshot: previous?.quantityScope !== QUANTITY_SCOPE_LOCATION,
       });
       if (!inv.ok && 'conflict' in inv) {
         return NextResponse.json(

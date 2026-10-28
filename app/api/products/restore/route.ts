@@ -3,7 +3,7 @@ import { getBearerToken, verifySessionToken, shopifyGraphQL } from '@/lib/shopif
 import { getWorkingAccessToken, ReauthRequiredError } from '@/lib/access-token';
 import { requireActivePlan } from '@/lib/billing-guard';
 import { prisma } from '@/lib/db';
-import { conflictMessage, revertQuantityGuarded } from '@/lib/inventory';
+import { QUANTITY_SCOPE_LOCATION, conflictMessage, revertQuantityGuarded } from '@/lib/inventory';
 
 export const dynamic = 'force-dynamic';
 
@@ -81,14 +81,40 @@ export async function POST(req: NextRequest) {
     const has = (k: string) => Object.prototype.hasOwnProperty.call(merged, k);
     // The quantity Shopify should hold right now = the value written by the NEWEST open
     // edit that touched quantity. Used as the compare-and-swap guard below.
+    // Every open quantity edit must target the same inventory item AND location, otherwise
+    // that value is not comparable with the stock at the restore location.
     let lastWrittenQuantity: number | null = null;
+    const quantityTargets = new Set<string>();
     for (const e of entries) {
+      let q: unknown;
       try {
-        const q = JSON.parse(e.changes ?? '{}')?.quantity;
-        if (typeof q === 'number') lastWrittenQuantity = q;
+        q = JSON.parse(e.changes ?? '{}')?.quantity;
       } catch {
-        /* ignore unreadable rows */
+        continue; // unreadable `changes`: not a known quantity write
       }
+      if (typeof q !== 'number') continue;
+      lastWrittenQuantity = q;
+      let p: any = null;
+      try {
+        p = JSON.parse(e.previousValues ?? '{}');
+      } catch {
+        p = null; // unknown target: counted as its own target so it can never match silently
+      }
+      quantityTargets.add(p ? `${p?.inventoryItemId ?? '?'}|${p?.locationId ?? '?'}` : `unreadable:${e.id}`);
+    }
+    // Not overridable: acceptCurrentQuantity is ignored here because no single "current"
+    // value exists to confirm against. Checked before any Shopify call.
+    if (quantityTargets.size > 1) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: 'inventory_target_mismatch',
+          message:
+            'The open edits for this product changed stock at different locations or variants, ' +
+            'so it cannot be restored automatically. Nothing was restored. Adjust stock manually in Shopify.',
+        },
+        { status: 409 },
+      );
     }
     for (const e of revertible) {
       let prev: any;
@@ -119,6 +145,7 @@ export async function POST(req: NextRequest) {
         merged.quantity = prev.quantity;
         merged.inventoryItemId = prev.inventoryItemId;
         merged.locationId = prev.locationId;
+        merged.quantityScope = prev.quantityScope;
       }
     }
 
@@ -158,6 +185,7 @@ export async function POST(req: NextRequest) {
         target: Number(merged.quantity),
         expected: lastWrittenQuantity,
         acceptCurrent: typeof body?.acceptCurrentQuantity === 'number' ? body.acceptCurrentQuantity : null,
+        legacySnapshot: merged.quantityScope !== QUANTITY_SCOPE_LOCATION,
       });
       if (!inv.ok && 'conflict' in inv) {
         return NextResponse.json(

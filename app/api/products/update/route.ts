@@ -4,7 +4,13 @@ import { getBearerToken, verifySessionToken, shopifyGraphQL } from '@/lib/shopif
 import { getWorkingAccessToken, ReauthRequiredError } from '@/lib/access-token';
 import { limitExceededResponse, requireActivePlan } from '@/lib/billing-guard';
 import { prisma } from '@/lib/db';
-import { INV_SET_QUANTITIES, inventorySetVariables, isStaleQuantityError, readAvailable } from '@/lib/inventory';
+import {
+  INV_SET_QUANTITIES,
+  QUANTITY_SCOPE_LOCATION,
+  inventorySetVariables,
+  isStaleQuantityError,
+  readAvailable,
+} from '@/lib/inventory';
 import { incrementUsage } from '@/lib/usage';
 
 export const dynamic = 'force-dynamic';
@@ -235,6 +241,7 @@ export async function POST(req: NextRequest) {
               previous.quantity = before;
               previous.inventoryItemId = u?.inventoryItemId ?? null;
               previous.locationId = locationId;
+              previous.quantityScope = QUANTITY_SCOPE_LOCATION;
             }
           }
         } catch (e: any) {

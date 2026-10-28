@@ -66,8 +66,32 @@ export function isStaleQuantityError(errs: any): boolean {
   return Array.isArray(errs) && errs.some((e: any) => e?.code === 'CHANGE_FROM_QUANTITY_STALE');
 }
 
+// Marker stored in EditLog.previousValues next to `quantity` by the bulk update route
+// since the CAS change. Rows WITHOUT it are legacy: their `quantity` is the client's
+// variant total across ALL locations, not the value at `locationId`.
+export const QUANTITY_SCOPE_LOCATION = 'location';
+
+export const INV_LEVEL_COUNT_QUERY = `
+  query InvLevelCount($inventoryItemId: ID!) {
+    inventoryItem(id: $inventoryItemId) {
+      id
+      inventoryLevels(first: 2) { edges { node { id } } }
+    }
+  }
+`;
+
+// Number of locations the item is stocked at (capped at 2: we only need "1" vs "more").
+export async function countStockedLocations(shop: string, accessToken: string, inventoryItemId: string): Promise<number> {
+  const d: any = await shopifyGraphQL(shop, accessToken, INV_LEVEL_COUNT_QUERY, { inventoryItemId });
+  return (d?.inventoryItem?.inventoryLevels?.edges ?? []).length;
+}
+
 export type InventoryConflict = {
   field: 'quantity';
+  // stock_changed: Shopify no longer holds the value our edit wrote.
+  // legacy_multi_location: pre-CAS snapshot (cross-location total) on an item stocked at
+  // more than one location, so the target may be wrong; needs explicit confirmation.
+  reason: 'stock_changed' | 'legacy_multi_location';
   inventoryItemId: string;
   locationId: string;
   expected: number | null; // what our edit left behind
@@ -98,13 +122,18 @@ export async function revertQuantityGuarded(
     target: number;
     expected: number | null;
     acceptCurrent?: number | null;
+    legacySnapshot?: boolean;
   },
 ): Promise<GuardedRevertResult> {
   const { inventoryItemId, locationId, target, expected } = args;
-  const compareTo = typeof args.acceptCurrent === 'number' ? args.acceptCurrent : expected;
-  const conflict = (current: number | null): GuardedRevertResult => ({
+  const confirmed = typeof args.acceptCurrent === 'number';
+  const compareTo = confirmed ? (args.acceptCurrent as number) : expected;
+  const conflict = (
+    current: number | null,
+    reason: InventoryConflict['reason'] = 'stock_changed',
+  ): GuardedRevertResult => ({
     ok: false,
-    conflict: { field: 'quantity', inventoryItemId, locationId, expected, current, target },
+    conflict: { field: 'quantity', reason, inventoryItemId, locationId, expected, current, target },
   });
 
   let current: number | null;
@@ -118,6 +147,20 @@ export async function revertQuantityGuarded(
   }
   // Already at the target (e.g. retry after a partial undo): nothing to write, nothing to lose.
   if (current === target) return { ok: true, changed: false };
+  // Legacy snapshot: only trustworthy when the item is stocked at exactly one location
+  // (then the variant total == the location value). Otherwise ask the merchant first.
+  // Checked BEFORE the stock_changed comparison: the confirmation sent back for a
+  // stock_changed conflict (acceptCurrent) also skips this check, so the merchant must have
+  // seen the legacy warning before any override can write a possibly cross-location total.
+  if (args.legacySnapshot && !confirmed) {
+    let n: number;
+    try {
+      n = await countStockedLocations(shop, accessToken, inventoryItemId);
+    } catch (e: any) {
+      return { ok: false, error: `quantity: could not check stock locations (${e?.message ?? 'error'})` };
+    }
+    if (n !== 1) return conflict(current, 'legacy_multi_location');
+  }
   if (compareTo === null || current !== compareTo) return conflict(current);
 
   try {
@@ -139,6 +182,18 @@ export async function revertQuantityGuarded(
 }
 
 export function conflictMessage(c: InventoryConflict): string {
+  if (c.reason === 'legacy_multi_location') {
+    const moved =
+      c.current !== c.expected
+        ? ` Stock has also changed since the edit (it was left at ${c.expected === null ? 'an unknown value' : c.expected}).`
+        : '';
+    return (
+      `This edit was saved before per-location stock snapshots, and this item is stocked at ` +
+      `more than one location, so the saved original (${c.target}) may be the total across all ` +
+      `locations.${moved} Nothing was restored. Restoring would set stock at this location to ` +
+      `${c.target} (currently ${c.current}).`
+    );
+  }
   const now = c.current === null ? 'it changed again while restoring' : `it is now ${c.current}`;
   const was = c.expected === null ? 'an unknown value' : String(c.expected);
   return (

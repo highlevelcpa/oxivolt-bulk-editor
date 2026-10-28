@@ -821,7 +821,8 @@ export default function BulkEditor({ shop, host }: { shop: string; host: string 
         return;
       }
       if (!res.ok || data?.success === false) {
-        toast.error(data?.error ?? 'Could not restore this product.');
+        // Coded errors (e.g. 409 inventory_target_mismatch) carry the readable text in `message`.
+        toast.error(data?.message ?? data?.error ?? 'Could not restore this product.');
         return;
       }
       toast.success('Product restored to its original state.');

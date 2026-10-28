@@ -79,6 +79,8 @@ let editLogRows: any[] = [];
 let locationsResponse: any = { locations: { edges: [{ node: { id: LOCATION_ID } }] } };
 // Simulated Shopify `available` quantity per inventory item at LOCATION_ID (default 7).
 let levels: Record<string, number> = {};
+// Number of locations each inventory item is stocked at (default 1 = single-location store).
+let stockedLocations: Record<string, number> = {};
 const levelOf = (id: string) => (id in levels ? levels[id] : 7);
 
 function opName(query: string): string {
@@ -86,6 +88,7 @@ function opName(query: string): string {
   if (query.includes('currentAppInstallation')) return 'billing';
   if (query.includes('locations(')) return 'locations';
   if (query.includes('inventoryLevel(locationId')) return 'invLevel';
+  if (query.includes('inventoryLevels(first')) return 'invLevelCount';
   if (query.includes('productUpdate(')) return 'productUpdate';
   if (query.includes('productVariantsBulkUpdate(')) return 'variantPrice';
   if (query.includes('inventoryItemUpdate(')) return 'invItemUpdate';
@@ -130,6 +133,10 @@ function defaultHandler(op: string, vars: any, query = ''): any {
           },
         },
       };
+    case 'invLevelCount': {
+      const n = stockedLocations[vars?.inventoryItemId] ?? 1;
+      return { data: { inventoryItem: { id: vars?.inventoryItemId, inventoryLevels: { edges: Array.from({ length: Math.min(n, 2) }, (_, i) => ({ node: { id: `lvl${i}` } })) } } } };
+    }
     case 'invSet': {
       const errors = validateIdempotency(query, vars) ?? validateSetInput2026_04(vars?.input);
       if (errors) return { errors };
@@ -206,6 +213,7 @@ beforeEach(() => {
   editLogRows = [];
   locationsResponse = { locations: { edges: [{ node: { id: LOCATION_ID } }] } };
   levels = {};
+  stockedLocations = {};
 });
 
 function sessionToken() {
@@ -272,6 +280,7 @@ test('sets an absolute available quantity with a 2026-01/2026-04-valid payload',
     quantity: 7,
     inventoryItemId: 'gid://shopify/InventoryItem/1',
     locationId: LOCATION_ID,
+    quantityScope: 'location',
   });
   assert.deepEqual(usageIncrements, [1]);
 });
@@ -450,8 +459,9 @@ test('CAS guard is the server-read location quantity, never the client prevQuant
     assert.equal(q.changeFromQuantity, 4); // read from Shopify, not the client-side 999
     assert.ok(!('compareQuantity' in q));
   }
-  // The Undo snapshot is the value actually overwritten at this location.
+  // The Undo snapshot is the value actually overwritten at this location, marked as such.
   assert.equal(JSON.parse(editLogs[0].previousValues).quantity, 4);
+  assert.equal(JSON.parse(editLogs[0].previousValues).quantityScope, 'location');
 });
 
 test('a sale between read and write (CAS stale) is reported and no Undo snapshot is stored', async () => {
@@ -689,4 +699,115 @@ test('restore after a sale returns 409 and writes nothing', async () => {
   assert.deepEqual([body.conflict.expected, body.conflict.current, body.conflict.target], [80, 79, 3]);
   assert.equal(callsOf('invSet').length, 0);
   assert.equal(callsOf('productUpdate').length, 0);
+});
+
+// ---------------------------------------------------------------------------
+// Legacy (pre-CAS) snapshots and multi-location consistency
+// ---------------------------------------------------------------------------
+const legacyRow = (id: string, written: number, prev: number) => ({
+  id, shop: SHOP, productId: 'gid://shopify/Product/1', success: true, undone: false,
+  changes: JSON.stringify({ quantity: written }),
+  previousValues: JSON.stringify({ quantity: prev, inventoryItemId: 'gid://shopify/InventoryItem/1', locationId: LOCATION_ID }),
+});
+
+test('legacy snapshot on a multi-location item: undo and restore return 409 legacy_multi_location and write nothing', async () => {
+  stockedLocations['gid://shopify/InventoryItem/1'] = 2;
+  levels['gid://shopify/InventoryItem/1'] = 15;
+  editLogRows = [legacyRow('lg1', 15, 40)];
+  const u = await undoPOST(request('/api/products/undo', { editLogId: 'lg1' }));
+  assert.equal(u.status, 409);
+  const ub = await u.json();
+  assert.equal(ub.conflict.reason, 'legacy_multi_location');
+  assert.match(ub.message, /more than one location/);
+  const r = await restorePOST(request('/api/products/restore', { productId: 'gid://shopify/Product/1' }));
+  assert.equal(r.status, 409);
+  assert.equal((await r.json()).conflict.reason, 'legacy_multi_location');
+  assert.equal(callsOf('invSet').length, 0);
+  assert.equal(levels['gid://shopify/InventoryItem/1'], 15);
+});
+
+test('legacy snapshot on a multi-location item proceeds only after explicit confirmation (still CAS-guarded)', async () => {
+  stockedLocations['gid://shopify/InventoryItem/1'] = 2;
+  levels['gid://shopify/InventoryItem/1'] = 15;
+  editLogRows = [legacyRow('lg2', 15, 40)];
+  const r = await restorePOST(request('/api/products/restore', { productId: 'gid://shopify/Product/1', acceptCurrentQuantity: 15 }));
+  assert.equal((await r.json()).success, true);
+  assert.equal(callsOf('invSet')[0].variables.input.quantities[0].changeFromQuantity, 15);
+  assert.equal(levels['gid://shopify/InventoryItem/1'], 40);
+});
+
+test('legacy snapshot on a single-location item restores normally (total == location value)', async () => {
+  levels['gid://shopify/InventoryItem/1'] = 15;
+  editLogRows = [legacyRow('lg3', 15, 10)];
+  const r = await restorePOST(request('/api/products/restore', { productId: 'gid://shopify/Product/1' }));
+  assert.equal((await r.json()).success, true);
+  assert.equal(callsOf('invLevelCount').length, 1);
+  assert.equal(levels['gid://shopify/InventoryItem/1'], 10);
+});
+
+test('new (location-scoped) snapshots skip the location-count check', async () => {
+  stockedLocations['gid://shopify/InventoryItem/1'] = 2;
+  levels['gid://shopify/InventoryItem/1'] = 15;
+  editLogRows = [{ ...legacyRow('nw', 15, 10), previousValues: JSON.stringify({ quantity: 10, inventoryItemId: 'gid://shopify/InventoryItem/1', locationId: LOCATION_ID, quantityScope: 'location' }) }];
+  const r = await undoPOST(request('/api/products/undo', { editLogId: 'nw' }));
+  assert.deepEqual(await r.json(), { success: true });
+  assert.equal(callsOf('invLevelCount').length, 0);
+  assert.equal(levels['gid://shopify/InventoryItem/1'], 10);
+});
+
+test('restore returns 409 inventory_target_mismatch when open quantity edits span different locations; zero Shopify calls, override ignored', async () => {
+  levels['gid://shopify/InventoryItem/1'] = 80;
+  editLogRows = [
+    { ...legacyRow('m1', 200, 3), changes: JSON.stringify({ quantity: 200, title: 'AI title' }), previousValues: JSON.stringify({ quantity: 3, inventoryItemId: 'gid://shopify/InventoryItem/1', locationId: LOCATION_ID, title: 'Old title', price: '12.00', variantId: 'gid://shopify/ProductVariant/1' }) },
+    { ...legacyRow('m2', 80, 50), previousValues: JSON.stringify({ quantity: 50, inventoryItemId: 'gid://shopify/InventoryItem/1', locationId: 'gid://shopify/Location/2', quantityScope: 'location' }) },
+  ];
+  let markedUndone = 0;
+  const realUpdateMany = fakePrisma.editLog.updateMany;
+  fakePrisma.editLog.updateMany = async (a: any) => { markedUndone++; return realUpdateMany(a); };
+  try {
+    for (const extra of [{}, { acceptCurrentQuantity: 80 }]) {
+      calls = [];
+      const r = await restorePOST(request('/api/products/restore', { productId: 'gid://shopify/Product/1', ...extra }));
+      assert.equal(r.status, 409);
+      const b = await r.json();
+      assert.equal(b.success, false);
+      assert.equal(b.error, 'inventory_target_mismatch');
+      assert.equal(
+        b.message,
+        'The open edits for this product changed stock at different locations or variants, ' +
+          'so it cannot be restored automatically. Nothing was restored. Adjust stock manually in Shopify.',
+      );
+      assert.equal(b.conflict, undefined); // no conflict payload => the UI offers no "set anyway" override
+      assert.equal(calls.length, 0, `expected zero Shopify calls, got: ${calls.map((c) => opName(c.query)).join(',')}`);
+    }
+  } finally {
+    fakePrisma.editLog.updateMany = realUpdateMany;
+  }
+  assert.equal(markedUndone, 0);
+  assert.equal(levels['gid://shopify/InventoryItem/1'], 80);
+});
+
+test('legacy multi-location row whose stock ALSO changed reports legacy_multi_location first, so a stock_changed override cannot skip the warning', async () => {
+  stockedLocations['gid://shopify/InventoryItem/1'] = 2;
+  levels['gid://shopify/InventoryItem/1'] = 13; // edit wrote 15, then 2 were sold
+  editLogRows = [legacyRow('lg4', 15, 40)];
+  for (const call of [
+    () => undoPOST(request('/api/products/undo', { editLogId: 'lg4' })),
+    () => restorePOST(request('/api/products/restore', { productId: 'gid://shopify/Product/1' })),
+  ]) {
+    const r = await call();
+    assert.equal(r.status, 409);
+    const b = await r.json();
+    assert.equal(b.conflict.reason, 'legacy_multi_location');
+    assert.deepEqual([b.conflict.expected, b.conflict.current, b.conflict.target], [15, 13, 40]);
+    assert.match(b.message, /more than one location/);
+    assert.match(b.message, /Stock has also changed since the edit \(it was left at 15\)/);
+  }
+  assert.equal(callsOf('invSet').length, 0);
+  // Only after confirming the value shown (13) does it write, still CAS-guarded on 13.
+  calls = [];
+  const ok = await restorePOST(request('/api/products/restore', { productId: 'gid://shopify/Product/1', acceptCurrentQuantity: 13 }));
+  assert.equal((await ok.json()).success, true);
+  assert.equal(callsOf('invSet')[0].variables.input.quantities[0].changeFromQuantity, 13);
+  assert.equal(levels['gid://shopify/InventoryItem/1'], 40);
 });
