@@ -1,29 +1,17 @@
-import Image from 'next/image';
 import Link from 'next/link';
 import type { Metadata } from 'next';
 import { Mail } from 'lucide-react';
+import { ResourceHeader } from './resource-header';
+import { NAV, type ResourceKey } from './resource-nav';
 
 // Shared chrome for the public Help Center pages (/docs, /tutorial, /faq, /changelog, /privacy).
-// Server component, no client JS.
+// Server component; only the header (mobile menu toggle) ships client JS.
 
 export const SUPPORT_EMAIL = 'support@highlevelcpa.shop';
 export const YOUTUBE_ID = '8d0bBvcYTcs';
 
-export type ResourceKey = 'docs' | 'tutorial' | 'faq' | 'changelog' | 'privacy';
-
-const NAV: { key: ResourceKey; href: string; label: string }[] = [
-  { key: 'docs', href: '/docs', label: 'User Guide' },
-  { key: 'tutorial', href: '/tutorial', label: 'Tutorial' },
-  { key: 'faq', href: '/faq', label: 'FAQ' },
-  { key: 'changelog', href: '/changelog', label: 'Changelog' },
-  { key: 'privacy', href: '/privacy', label: 'Privacy' },
-];
-
-// Header adds a Home link (public landing page) before the Help Center items.
-const HEADER_NAV: { key: ResourceKey | 'home'; href: string; label: string }[] = [
-  { key: 'home', href: '/', label: 'Home' },
-  ...NAV,
-];
+export type { ResourceKey };
+export { NAV };
 
 export function resourceMetadata(title: string, description: string): Metadata {
   const fullTitle = `${title} — OXIVOLT Bulk Editor`;
@@ -32,42 +20,6 @@ export function resourceMetadata(title: string, description: string): Metadata {
     description,
     openGraph: { title: fullTitle, description, images: ['/og-image.png'] },
   };
-}
-
-// Sticky site header shared by the Help Center pages (via ResourceShell) and the public Home page.
-export function ResourceHeader({ current }: { current: ResourceKey | 'home' }) {
-  return (
-      <header className="sticky top-0 z-40 border-b border-border bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/80">
-        <div className="mx-auto flex w-full max-w-6xl flex-col gap-3 px-4 py-3 sm:px-6 md:flex-row md:items-center md:justify-between">
-          <Link href="/" className="flex items-center gap-2.5 self-start">
-            <Image src="/icon.png" alt="OXIVOLT logo" width={36} height={36} className="rounded-lg" />
-            <span className="font-display text-base font-bold leading-tight tracking-tight">OXIVOLT Bulk Editor</span>
-          </Link>
-          <nav aria-label="Help Center" className="-mx-4 overflow-x-auto px-4 md:mx-0 md:px-0">
-            <ul className="flex min-w-max items-center gap-1">
-              {HEADER_NAV.map((item) => {
-                const active = item.key === current;
-                return (
-                  <li key={item.key}>
-                    <Link
-                      href={item.href}
-                      aria-current={active ? 'page' : undefined}
-                      className={`inline-flex rounded-md px-3 py-2 text-sm font-medium transition-colors duration-fast focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
-                        active
-                          ? 'bg-primary/10 text-primary'
-                          : 'text-muted-foreground hover:bg-secondary hover:text-foreground'
-                      }`}
-                    >
-                      {item.label}
-                    </Link>
-                  </li>
-                );
-              })}
-            </ul>
-          </nav>
-        </div>
-      </header>
-  );
 }
 
 export function ResourceShell({
