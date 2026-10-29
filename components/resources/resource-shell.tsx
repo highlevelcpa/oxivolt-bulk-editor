@@ -1,6 +1,7 @@
+import Image from 'next/image';
 import Link from 'next/link';
 import type { Metadata } from 'next';
-import { Zap, Mail } from 'lucide-react';
+import { Mail } from 'lucide-react';
 
 // Shared chrome for the public Help Center pages (/docs, /tutorial, /faq, /changelog, /privacy).
 // Server component, no client JS.
@@ -33,38 +34,14 @@ export function resourceMetadata(title: string, description: string): Metadata {
   };
 }
 
-export function ResourceShell({
-  current,
-  eyebrow,
-  title,
-  intro,
-  children,
-}: {
-  current: ResourceKey;
-  eyebrow: string;
-  title: string;
-  intro: React.ReactNode;
-  children: React.ReactNode;
-}) {
+// Sticky site header shared by the Help Center pages (via ResourceShell) and the public Home page.
+export function ResourceHeader({ current }: { current: ResourceKey | 'home' }) {
   return (
-    <div className="flex min-h-screen flex-col bg-background text-foreground">
-      <a
-        href="#content"
-        className="sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-50 focus:rounded-md focus:bg-primary focus:px-3 focus:py-2 focus:text-primary-foreground"
-      >
-        Skip to content
-      </a>
-
       <header className="sticky top-0 z-40 border-b border-border bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/80">
         <div className="mx-auto flex w-full max-w-6xl flex-col gap-3 px-4 py-3 sm:px-6 md:flex-row md:items-center md:justify-between">
-          <Link href="/docs" className="flex items-center gap-2.5 self-start">
-            <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary text-primary-foreground shadow">
-              <Zap className="h-5 w-5" aria-hidden="true" />
-            </span>
-            <span className="leading-tight">
-              <span className="block font-display text-base font-bold tracking-tight">OXIVOLT Bulk Editor</span>
-              <span className="block text-xs text-muted-foreground">Help Center</span>
-            </span>
+          <Link href="/" className="flex items-center gap-2.5 self-start">
+            <Image src="/icon.png" alt="OXIVOLT logo" width={36} height={36} className="rounded-lg" />
+            <span className="font-display text-base font-bold leading-tight tracking-tight">OXIVOLT Bulk Editor</span>
           </Link>
           <nav aria-label="Help Center" className="-mx-4 overflow-x-auto px-4 md:mx-0 md:px-0">
             <ul className="flex min-w-max items-center gap-1">
@@ -90,6 +67,32 @@ export function ResourceShell({
           </nav>
         </div>
       </header>
+  );
+}
+
+export function ResourceShell({
+  current,
+  eyebrow,
+  title,
+  intro,
+  children,
+}: {
+  current: ResourceKey;
+  eyebrow: string;
+  title: string;
+  intro: React.ReactNode;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="flex min-h-screen flex-col bg-background text-foreground">
+      <a
+        href="#content"
+        className="sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-50 focus:rounded-md focus:bg-primary focus:px-3 focus:py-2 focus:text-primary-foreground"
+      >
+        Skip to content
+      </a>
+
+      <ResourceHeader current={current} />
 
       <main id="content" className="flex-1">
         <section className="hero-gradient border-b border-border">

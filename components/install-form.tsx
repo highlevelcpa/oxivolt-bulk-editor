@@ -5,7 +5,8 @@ import Link from 'next/link';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card } from '@/components/ui/card';
-import { Zap, Store, Tag, Boxes, ShieldCheck, ArrowRight, Sparkles, FolderTree, RotateCcw, Wand2 } from 'lucide-react';
+import { ResourceHeader } from '@/components/resources/resource-shell';
+import { Store, Tag, Boxes, ShieldCheck, ArrowRight, Sparkles, FolderTree, RotateCcw, Wand2 } from 'lucide-react';
 
 function normalizeShop(raw: string): string | null {
   let s = (raw ?? '').trim().toLowerCase();
@@ -50,15 +51,10 @@ export default function InstallForm() {
   ];
 
   return (
-    <main className="min-h-screen bg-background text-foreground">
-      <div className="mx-auto flex min-h-screen w-full max-w-[1200px] flex-col items-center justify-center px-6 py-16">
-        <div className="mb-6 flex items-center gap-3">
-          <span className="flex h-12 w-12 items-center justify-center rounded-lg bg-primary text-primary-foreground shadow-lg">
-            <Zap className="h-7 w-7" />
-          </span>
-          <span className="font-display text-2xl font-bold tracking-tight">OXIVOLT Bulk Editor</span>
-        </div>
-
+    <div className="flex min-h-screen flex-col bg-background text-foreground">
+      <ResourceHeader current="home" />
+    <main className="flex flex-1">
+      <div className="mx-auto flex w-full max-w-[1200px] flex-col items-center justify-center px-6 py-16">
         <h1 className="max-w-2xl text-center font-display text-4xl font-bold tracking-tight sm:text-5xl">
           Edit <span className="text-primary">hundreds</span> of products at once
         </h1>
@@ -119,5 +115,6 @@ export default function InstallForm() {
         </footer>
       </div>
     </main>
+    </div>
   );
 }
