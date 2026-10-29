@@ -15,10 +15,6 @@ const API_KEY = process.env.SHOPIFY_API_KEY ?? ''
 export const metadata: Metadata = {
   title: 'OXIVOLT Bulk Editor',
   description: 'Bulk edit vendor, price and inventory across all your Shopify products in seconds.',
-  icons: {
-    icon: '/favicon.svg',
-    shortcut: '/favicon.svg',
-  },
   openGraph: {
     title: 'OXIVOLT Bulk Editor',
     description: 'Bulk edit vendor, price and inventory across all your Shopify products in seconds.',
