@@ -811,3 +811,188 @@ test('legacy multi-location row whose stock ALSO changed reports legacy_multi_lo
   assert.equal(callsOf('invSet')[0].variables.input.quantities[0].changeFromQuantity, 13);
   assert.equal(levels['gid://shopify/InventoryItem/1'], 40);
 });
+
+// ---------------------------------------------------------------------------
+// 9. Server-side request validation (lib/update-validate.ts)
+//
+// `forbidWrites()` turns every Shopify write mutation into a recorded violation, so a
+// test fails if invalid input ever reaches productUpdate / productVariantsBulkUpdate /
+// inventoryItemUpdate / inventoryActivate / inventorySetQuantities.
+// ---------------------------------------------------------------------------
+const WRITE_OPS = ['productUpdate', 'variantPrice', 'invItemUpdate', 'invActivate', 'invSet'];
+let writeViolations: string[] = [];
+function forbidWrites(allow: (op: string, vars: any) => boolean = () => false) {
+  writeViolations = [];
+  for (const op of WRITE_OPS) {
+    overrides[op] = (vars) => {
+      if (allow(op, vars)) return defaultHandler(op, vars, op === 'invSet' ? 'inventorySetQuantities(input: $input) @idempotent(key: $idempotencyKey)' : '');
+      writeViolations.push(`${op} ${JSON.stringify(vars)}`);
+      return { errors: [{ message: `TEST VIOLATION: ${op} must not be called` }] };
+    };
+  }
+}
+const writesFor = (n: number) =>
+  calls.filter((c) => WRITE_OPS.includes(opName(c.query)) && JSON.stringify(c.variables).match(new RegExp(`/(Product|ProductVariant|InventoryItem)/${n}"`)));
+
+const INVALID_ITEMS: [string, Record<string, any>][] = [
+  ['empty price', { price: '' }],
+  ['whitespace price', { price: '   ' }],
+  ['non-numeric price', { price: 'abc' }],
+  ['negative price', { price: '-5' }],
+  ['exponent price', { price: '1e3' }],
+  ['currency-symbol price', { price: '$10' }],
+  ['thousands-separator price', { price: '1,000.00' }],
+  ['NaN-like price', { price: 'NaN' }],
+  ['negative numeric price', { price: -1 }],
+  ['price object', { price: {} }],
+  ['price without variant id', { price: '10.00', variantId: null }],
+  ['price with malformed variant id', { price: '10.00', variantId: 'not-a-gid' }],
+  ['empty quantity', { quantity: '' }],
+  ['whitespace quantity', { quantity: '  ' }],
+  ['negative quantity', { quantity: -1 }],
+  ['negative string quantity', { quantity: '-3' }],
+  ['fractional quantity', { quantity: 2.5 }],
+  ['exponent quantity', { quantity: '1e3' }],
+  ['boolean quantity', { quantity: true }],
+  ['huge quantity', { quantity: 1_000_000_001 }],
+  ['quantity with malformed inventory item id', { quantity: 3, inventoryItemId: 'abc' }],
+  ['empty vendor', { vendor: '' }],
+  ['whitespace vendor', { vendor: '   ' }],
+  ['non-text vendor', { vendor: 42 }],
+  ['over-long vendor', { vendor: 'x'.repeat(256) }],
+  ['invalid status', { status: 'deleted' }],
+  ['empty product type', { productType: '' }],
+  ['tags not a list', { tags: 'a,b' }],
+  ['empty tag', { tags: ['ok', ''] }],
+  ['no requested change', {}],
+  ['malformed previous price (Undo snapshot)', { price: '5.00', prevPrice: 'abc' }],
+];
+
+for (const [label, extra] of INVALID_ITEMS) {
+  test(`validation: ${label} alone → 400, zero Shopify calls, nothing logged or counted`, async () => {
+    forbidWrites();
+    const { status, json } = await postUpdate([product(1, extra)]);
+    assert.equal(status, 400);
+    assert.equal(json.code, 'no_valid_updates');
+    assert.equal(json.results.length, 1);
+    assert.equal(json.results[0].success, false);
+    assert.equal(json.results[0].productId, 'gid://shopify/Product/1');
+    assert.ok(typeof json.results[0].error === 'string' && json.results[0].error.length > 0);
+    assert.deepEqual(writeViolations, []);
+    assert.equal(calls.length, 0, 'no Shopify call at all (not even the token probe or billing gate)');
+    assert.deepEqual(editLogs, []);
+    assert.deepEqual(usageIncrements, []);
+  });
+
+  test(`validation: ${label} next to a valid item → only the valid item is written`, async () => {
+    forbidWrites((_op, vars) => !JSON.stringify(vars).match(/\/(Product|ProductVariant|InventoryItem)\/1"/));
+    const { status, json } = await postUpdate([product(1, extra), product(2, { quantity: 4, price: '9.99', vendor: 'ACME' })]);
+    assert.equal(status, 200);
+    assert.equal(json.results[0].success, false);
+    assert.equal(json.results[0].productId, 'gid://shopify/Product/1');
+    assert.equal(json.results[1].success, true);
+    assert.deepEqual(json.results[1].changes, { vendor: 'ACME', price: '9.99', quantity: 4 });
+    assert.deepEqual(writeViolations, []);
+    assert.equal(writesFor(1).length, 0);
+    // The rejected item is not logged (nothing was attempted) and not counted.
+    assert.deepEqual(editLogs.map((l) => l.productId), ['gid://shopify/Product/2']);
+    assert.deepEqual(usageIncrements, [1]);
+  });
+}
+
+test('validation: specific error messages for price, quantity and vendor', async () => {
+  const { json } = await postUpdate([
+    product(1, { price: '' }),
+    product(2, { quantity: '' }),
+    product(3, { quantity: -1 }),
+    product(4, { vendor: '  ' }),
+    product(5, { price: '1.00', variantId: null }),
+    product(6, {}),
+  ]);
+  assert.match(json.results[0].error, /^price: invalid price/);
+  assert.equal(json.results[1].error, 'quantity: invalid quantity (must be a whole number)');
+  assert.equal(json.results[2].error, 'quantity: invalid quantity (must be between 0 and 1000000000)');
+  assert.equal(json.results[3].error, 'vendor: cannot be empty');
+  assert.equal(json.results[4].error, 'price: missing or invalid variant id for this product');
+  assert.equal(json.results[5].error, 'No changes requested for this product');
+});
+
+test('validation: quantity 0 (number and "0") is a valid absolute value and is written', async () => {
+  forbidWrites((op) => op !== 'productUpdate' && op !== 'variantPrice');
+  levels['gid://shopify/InventoryItem/1'] = 5;
+  levels['gid://shopify/InventoryItem/2'] = 5;
+  const { status, json } = await postUpdate([product(1, { quantity: 0 }), product(2, { quantity: '0' })]);
+  assert.equal(status, 200);
+  assert.ok(json.results.every((r: any) => r.success));
+  assert.deepEqual(callsOf('invSet').map((c) => c.variables.input.quantities[0].quantity), [0, 0]);
+  assert.deepEqual(writeViolations, []);
+});
+
+test('validation: price "0" / "0.00" and a numeric price are valid and sent as strings', async () => {
+  const { json } = await postUpdate([product(1, { price: '0' }), product(2, { price: '0.00' }), product(3, { price: 12.5 })]);
+  assert.ok(json.results.every((r: any) => r.success));
+  assert.deepEqual(callsOf('variantPrice').map((c) => c.variables.variants[0].price), ['0', '0.00', '12.5']);
+});
+
+test('validation: vendor is trimmed before it is sent to Shopify', async () => {
+  await postUpdate([product(1, { vendor: '  ACME  ' })]);
+  assert.equal(callsOf('productUpdate')[0].variables.product.vendor, 'ACME');
+});
+
+test('validation: request with only invalid items, mixed kinds → 400 and zero Shopify calls', async () => {
+  forbidWrites();
+  const { status, json } = await postUpdate([
+    product(1, { price: 'abc' }),
+    product(2, { quantity: -2 }),
+    product(3, { vendor: '' }),
+    { quantity: 3 },
+    null,
+    'garbage',
+  ]);
+  assert.equal(status, 400);
+  assert.equal(json.code, 'no_valid_updates');
+  assert.equal(json.results.length, 6);
+  assert.ok(json.results.every((r: any) => r.success === false && r.error));
+  assert.equal(calls.length, 0);
+  assert.deepEqual(writeViolations, []);
+});
+
+test('validation: malformed body shapes are rejected before any Shopify call', async () => {
+  for (const body of [{}, { updates: null }, { updates: 'x' }, { updates: {} }]) {
+    calls = [];
+    const res = await updatePOST(request('/api/products/update', body));
+    assert.equal(res.status, 400);
+    assert.equal((await res.json()).error, 'No updates provided');
+    assert.equal(calls.length, 0);
+  }
+  calls = [];
+  const raw = new NextRequestCtor('http://localhost/api/products/update', {
+    method: 'POST',
+    headers: { authorization: `Bearer ${sessionToken()}`, 'content-type': 'application/json' },
+    body: '{not json',
+  });
+  const res = await updatePOST(raw);
+  assert.equal(res.status, 400);
+  assert.equal(calls.length, 0);
+});
+
+test('validation: more than 50 items in one request → 400 too_many_updates, zero Shopify calls', async () => {
+  forbidWrites();
+  const many = Array.from({ length: 51 }, (_, i) => product(i + 1, { vendor: 'ACME' }));
+  const { status, json } = await postUpdate(many);
+  assert.equal(status, 400);
+  assert.equal(json.code, 'too_many_updates');
+  assert.equal(calls.length, 0);
+});
+
+test('validation: unauthenticated request is rejected before validation or any Shopify call', async () => {
+  const res = await updatePOST(
+    new NextRequestCtor('http://localhost/api/products/update', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ updates: [product(1, { price: 'abc' })] }),
+    }),
+  );
+  assert.equal(res.status, 401);
+  assert.equal(calls.length, 0);
+});

@@ -12,6 +12,7 @@ import {
   readAvailable,
 } from '@/lib/inventory';
 import { incrementUsage } from '@/lib/usage';
+import { validateUpdateRequest } from '@/lib/update-validate';
 
 export const dynamic = 'force-dynamic';
 
@@ -56,26 +57,6 @@ const INV_ACTIVATE = `
   }
 `;
 
-type UpdateItem = {
-  productId: string;
-  title?: string | null;
-  variantId?: string | null;
-  inventoryItemId?: string | null;
-  vendor?: string | null;
-  price?: string | null;
-  quantity?: number | null;
-  status?: string | null;
-  productType?: string | null;
-  tags?: string[] | null;
-  // Previous values captured client-side so we can offer Undo.
-  prevVendor?: string | null;
-  prevPrice?: string | null;
-  prevQuantity?: number | null;
-  prevStatus?: string | null;
-  prevProductType?: string | null;
-  prevTags?: string[] | null;
-};
-
 function firstError(errs: any[]): string | null {
   if (Array.isArray(errs) && errs.length > 0) {
     return errs.map((e: any) => e?.message ?? '').filter(Boolean).join('; ') || null;
@@ -91,11 +72,15 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
+    // Validate every item BEFORE any Shopify call (including the token probe and billing
+    // gate). A request with no valid item is rejected here with zero Shopify calls.
     const body = await req.json().catch(() => ({}));
-    const updates: UpdateItem[] = Array.isArray(body?.updates) ? body.updates : [];
-    if (updates.length === 0) {
-      return NextResponse.json({ error: 'No updates provided' }, { status: 400 });
+    const validation = validateUpdateRequest(body);
+    if (!validation.ok) {
+      return NextResponse.json(validation.body, { status: validation.status });
     }
+    const checked = validation.results;
+    const updates = checked.flatMap((r) => (r.ok ? [r.item] : []));
 
     let accessToken: string;
     try {
@@ -129,12 +114,15 @@ export async function POST(req: NextRequest) {
 
     const results: any[] = [];
 
-    for (const u of updates) {
-      const productId = u?.productId;
-      if (!productId) {
-        results.push({ productId: productId ?? '', success: false, error: 'Missing product id' });
+    // Iterate in request order so results[i] still corresponds to updates[i].
+    for (const v of checked) {
+      if (!v.ok) {
+        // Rejected by validation: never sent to Shopify, nothing to log or undo.
+        results.push({ productId: v.productId, success: false, error: v.error });
         continue;
       }
+      const u = v.item;
+      const productId = u.productId;
       const changeSummary: Record<string, any> = {};
       const previous: Record<string, any> = {};
       const errorParts: string[] = [];
