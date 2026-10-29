@@ -27,6 +27,13 @@ export function inventorySetVariables(
   quantity: number,
   changeFromQuantity: number | null,
 ) {
+  // 2026-04 requires the key on every quantity. JSON.stringify drops `undefined` (key
+  // omitted -> rejected by Shopify; flagged as deprecated usage on older versions) and turns
+  // NaN/Infinity into `null` (silently disabling the CAS guard), so only a safe integer
+  // or an explicit null may be sent.
+  if (changeFromQuantity !== null && !Number.isSafeInteger(changeFromQuantity)) {
+    throw new Error('quantity: changeFromQuantity must be an integer or null');
+  }
   return {
     input: {
       name: 'available',
