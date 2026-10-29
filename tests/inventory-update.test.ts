@@ -811,3 +811,161 @@ test('legacy multi-location row whose stock ALSO changed reports legacy_multi_lo
   assert.equal(callsOf('invSet')[0].variables.input.quantities[0].changeFromQuantity, 13);
   assert.equal(levels['gid://shopify/InventoryItem/1'], 40);
 });
+
+// ---------------------------------------------------------------------------
+// 11. Deprecated-field regression guards (Shopify API health warnings)
+//   - InventorySetQuantitiesInput.ignoreCompareQuantity: deprecated 2026-01, removed 2026-04.
+//   - InventoryQuantityInput.compareQuantity: deprecated 2026-01, removed 2026-04.
+//   - InventoryQuantityInput.changeFromQuantity: must be SENT on every quantity from 2026-04
+//     (an integer = CAS guard, explicit null = opt-out). Omitting the key is a runtime error.
+// ---------------------------------------------------------------------------
+test('no runtime source sends ignoreCompareQuantity / compareQuantity, and API_VERSION is 2026-04+', async () => {
+  const { readdirSync, readFileSync, statSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const root = join(__dirname, '..');
+  const offenders: string[] = [];
+  const walk = (dir: string) => {
+    for (const name of readdirSync(dir)) {
+      const p = join(dir, name);
+      if (statSync(p).isDirectory()) walk(p);
+      else if (/\.(ts|tsx|js|mjs)$/.test(name)) {
+        // Strip comments so documentation of the removed fields is allowed.
+        const code = readFileSync(p, 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
+        if (/\b(ignoreCompareQuantity|compareQuantity)\b/.test(code)) offenders.push(p.slice(root.length + 1));
+      }
+    }
+  };
+  for (const dir of ['app', 'lib', 'components', 'hooks', 'scripts', 'types']) walk(join(root, dir));
+  for (const name of readdirSync(root)) {
+    if (/\.(ts|tsx|js|mjs)$/.test(name) && !name.endsWith('.d.ts')) {
+      const code = readFileSync(join(root, name), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
+      if (/\b(ignoreCompareQuantity|compareQuantity)\b/.test(code)) offenders.push(name);
+    }
+  }
+  assert.deepEqual(offenders, []);
+
+  const { API_VERSION } = await import('../lib/shopify');
+  assert.ok(API_VERSION >= '2026-04', `API_VERSION ${API_VERSION} predates the changeFromQuantity requirement`);
+});
+
+test('inventorySetVariables always serializes changeFromQuantity (integer guard or explicit null opt-out)', async () => {
+  const { inventorySetVariables } = await import('../lib/inventory');
+  const guarded = JSON.parse(JSON.stringify(inventorySetVariables('gid://shopify/InventoryItem/1', LOCATION_ID, 12, 5)));
+  const optOut = JSON.parse(JSON.stringify(inventorySetVariables('gid://shopify/InventoryItem/1', LOCATION_ID, 12, null)));
+  for (const v of [guarded, optOut]) {
+    assert.equal(validateSetInput2026_04(v.input), null);
+    assert.deepEqual(Object.keys(v.input).sort(), ['name', 'quantities', 'reason']);
+    assert.deepEqual(Object.keys(v.input.quantities[0]).sort(), [...QTY_INPUT_FIELDS_2026_04].sort());
+    assert.ok(typeof v.idempotencyKey === 'string' && v.idempotencyKey.length > 0);
+  }
+  assert.equal(guarded.input.quantities[0].changeFromQuantity, 5);
+  // The key must survive JSON serialization as null (not be dropped like `undefined`).
+  assert.ok('changeFromQuantity' in optOut.input.quantities[0]);
+  assert.equal(optOut.input.quantities[0].changeFromQuantity, null);
+});
+
+test('inventorySetVariables refuses values that would drop the key or silently disable CAS', async () => {
+  const { inventorySetVariables } = await import('../lib/inventory');
+  for (const bad of [undefined, NaN, Infinity, -Infinity, 1.5, '5'] as any[]) {
+    assert.throws(() => inventorySetVariables('gid://shopify/InventoryItem/1', LOCATION_ID, 12, bad), /changeFromQuantity/);
+  }
+  assert.doesNotThrow(() => inventorySetVariables('gid://shopify/InventoryItem/1', LOCATION_ID, 12, 0));
+  assert.doesNotThrow(() => inventorySetVariables('gid://shopify/InventoryItem/1', LOCATION_ID, 12, -3));
+});
+
+// Asserts on the ACTUAL request body sent over the wire (calls[] is parsed from the fetch body).
+function assertWirePayloadClean(call: Call, expectedChangeFrom: number) {
+  const raw = JSON.stringify({ query: call.query, variables: call.variables });
+  assert.ok(!/\b(ignoreCompareQuantity|compareQuantity)\b/.test(raw), `deprecated field sent: ${raw}`);
+  assert.deepEqual(Object.keys(call.variables.input).sort(), ['name', 'quantities', 'reason']);
+  for (const q of call.variables.input.quantities) {
+    assert.deepEqual(Object.keys(q).sort(), [...QTY_INPUT_FIELDS_2026_04].sort());
+    assert.equal(q.changeFromQuantity, expectedChangeFrom); // CAS guard, never the null opt-out
+  }
+  assert.equal(validateSetInput2026_04(call.variables.input), null);
+  assert.equal(validateIdempotency(call.query, call.variables), null);
+}
+
+test('wire payload: bulk update sends changeFromQuantity = server-read stock, no deprecated fields', async () => {
+  levels['gid://shopify/InventoryItem/1'] = 9;
+  levels['gid://shopify/InventoryItem/2'] = 0;
+  const r = await postUpdate([product(1, { quantity: 15, prevQuantity: 999 }), product(2, { quantity: 4 })]);
+  assert.ok(r.json.results.every((x: any) => x.success));
+  const sets = callsOf('invSet');
+  assert.equal(sets.length, 2);
+  assertWirePayloadClean(sets[0], 9);
+  assertWirePayloadClean(sets[1], 0);
+});
+
+test('wire payload: undo sends changeFromQuantity = value our edit wrote, no deprecated fields', async () => {
+  editLogRows = [{
+    id: 'log1', shop: SHOP, productId: 'gid://shopify/Product/1', success: true, undone: false,
+    changes: JSON.stringify({ quantity: 50 }),
+    previousValues: JSON.stringify({ quantity: 6, inventoryItemId: 'gid://shopify/InventoryItem/1', locationId: LOCATION_ID, quantityScope: 'location' }),
+  }];
+  levels['gid://shopify/InventoryItem/1'] = 50;
+  const res = await undoPOST(request('/api/products/undo', { editLogId: 'log1' }));
+  assert.deepEqual(await res.json(), { success: true });
+  assertWirePayloadClean(callsOf('invSet')[0], 50);
+  assert.equal(levels['gid://shopify/InventoryItem/1'], 6);
+});
+
+test('wire payload: restore sends changeFromQuantity = newest written value, no deprecated fields', async () => {
+  editLogRows = [
+    { id: 'a', shop: SHOP, productId: 'gid://shopify/Product/1', success: true, undone: false, changes: JSON.stringify({ quantity: 20 }), previousValues: JSON.stringify({ quantity: 2, inventoryItemId: 'gid://shopify/InventoryItem/1', locationId: LOCATION_ID, quantityScope: 'location' }) },
+    { id: 'b', shop: SHOP, productId: 'gid://shopify/Product/1', success: true, undone: false, changes: JSON.stringify({ quantity: 30 }), previousValues: JSON.stringify({ quantity: 20, inventoryItemId: 'gid://shopify/InventoryItem/1', locationId: LOCATION_ID, quantityScope: 'location' }) },
+  ];
+  levels['gid://shopify/InventoryItem/1'] = 30;
+  const res = await restorePOST(request('/api/products/restore', { productId: 'gid://shopify/Product/1' }));
+  assert.equal((await res.json()).success, true);
+  const sets = callsOf('invSet');
+  assert.equal(sets.length, 1);
+  assertWirePayloadClean(sets[0], 30);
+  assert.equal(levels['gid://shopify/InventoryItem/1'], 2);
+});
+
+test('compare-and-set: a stock change between read and write is NOT overwritten on bulk update, undo or restore', async () => {
+  // Bulk update: Shopify stock moves after our read -> CAS stale, stock untouched.
+  levels['gid://shopify/InventoryItem/1'] = 9;
+  overrides.invSet = (vars: any) => {
+    levels['gid://shopify/InventoryItem/1'] = 8; // a sale lands first
+    delete overrides.invSet;
+    return defaultHandler('invSet', vars, calls[calls.length - 1].query);
+  };
+  const r = await postUpdate([product(1, { quantity: 15 })]);
+  assert.equal(r.json.results[0].success, false);
+  assert.equal(levels['gid://shopify/InventoryItem/1'], 8);
+  assertWirePayloadClean(callsOf('invSet')[0], 9);
+
+  // Undo: same race -> 409 conflict, stock untouched.
+  calls = [];
+  editLogRows = [{
+    id: 'log1', shop: SHOP, productId: 'gid://shopify/Product/1', success: true, undone: false,
+    changes: JSON.stringify({ quantity: 50 }),
+    previousValues: JSON.stringify({ quantity: 6, inventoryItemId: 'gid://shopify/InventoryItem/1', locationId: LOCATION_ID, quantityScope: 'location' }),
+  }];
+  levels['gid://shopify/InventoryItem/1'] = 50;
+  overrides.invSet = (vars: any) => {
+    levels['gid://shopify/InventoryItem/1'] = 49;
+    delete overrides.invSet;
+    return defaultHandler('invSet', vars, calls[calls.length - 1].query);
+  };
+  const u = await undoPOST(request('/api/products/undo', { editLogId: 'log1' }));
+  assert.equal(u.status, 409);
+  assert.equal(levels['gid://shopify/InventoryItem/1'], 49);
+  assertWirePayloadClean(callsOf('invSet')[0], 50);
+
+  // Restore: same race -> 409 conflict, stock untouched.
+  calls = [];
+  editLogRows = [{ id: 'a', shop: SHOP, productId: 'gid://shopify/Product/1', success: true, undone: false, changes: JSON.stringify({ quantity: 30 }), previousValues: JSON.stringify({ quantity: 2, inventoryItemId: 'gid://shopify/InventoryItem/1', locationId: LOCATION_ID, quantityScope: 'location' }) }];
+  levels['gid://shopify/InventoryItem/1'] = 30;
+  overrides.invSet = (vars: any) => {
+    levels['gid://shopify/InventoryItem/1'] = 29;
+    delete overrides.invSet;
+    return defaultHandler('invSet', vars, calls[calls.length - 1].query);
+  };
+  const s = await restorePOST(request('/api/products/restore', { productId: 'gid://shopify/Product/1' }));
+  assert.equal(s.status, 409);
+  assert.equal(levels['gid://shopify/InventoryItem/1'], 29);
+  assertWirePayloadClean(callsOf('invSet')[0], 30);
+});
