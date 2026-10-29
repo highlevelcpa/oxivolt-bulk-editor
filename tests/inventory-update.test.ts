@@ -811,3 +811,49 @@ test('legacy multi-location row whose stock ALSO changed reports legacy_multi_lo
   assert.equal(callsOf('invSet')[0].variables.input.quantities[0].changeFromQuantity, 13);
   assert.equal(levels['gid://shopify/InventoryItem/1'], 40);
 });
+
+// ---------------------------------------------------------------------------
+// 11. Deprecated-field regression guards (Shopify API health warnings)
+//   - InventorySetQuantitiesInput.ignoreCompareQuantity: deprecated 2026-01, removed 2026-04.
+//   - InventoryQuantityInput.compareQuantity: deprecated 2026-01, removed 2026-04.
+//   - InventoryQuantityInput.changeFromQuantity: must be SENT on every quantity from 2026-04
+//     (an integer = CAS guard, explicit null = opt-out). Omitting the key is a runtime error.
+// ---------------------------------------------------------------------------
+test('no runtime source sends ignoreCompareQuantity / compareQuantity, and API_VERSION is 2026-04+', async () => {
+  const { readdirSync, readFileSync, statSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const root = join(__dirname, '..');
+  const offenders: string[] = [];
+  const walk = (dir: string) => {
+    for (const name of readdirSync(dir)) {
+      const p = join(dir, name);
+      if (statSync(p).isDirectory()) walk(p);
+      else if (/\.(ts|tsx|js|mjs)$/.test(name)) {
+        // Strip comments so documentation of the removed fields is allowed.
+        const code = readFileSync(p, 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
+        if (/\b(ignoreCompareQuantity|compareQuantity)\b/.test(code)) offenders.push(p.slice(root.length + 1));
+      }
+    }
+  };
+  for (const dir of ['app', 'lib', 'components']) walk(join(root, dir));
+  assert.deepEqual(offenders, []);
+
+  const { API_VERSION } = await import('../lib/shopify');
+  assert.ok(API_VERSION >= '2026-04', `API_VERSION ${API_VERSION} predates the changeFromQuantity requirement`);
+});
+
+test('inventorySetVariables always serializes changeFromQuantity (integer guard or explicit null opt-out)', async () => {
+  const { inventorySetVariables } = await import('../lib/inventory');
+  const guarded = JSON.parse(JSON.stringify(inventorySetVariables('gid://shopify/InventoryItem/1', LOCATION_ID, 12, 5)));
+  const optOut = JSON.parse(JSON.stringify(inventorySetVariables('gid://shopify/InventoryItem/1', LOCATION_ID, 12, null)));
+  for (const v of [guarded, optOut]) {
+    assert.equal(validateSetInput2026_04(v.input), null);
+    assert.deepEqual(Object.keys(v.input).sort(), ['name', 'quantities', 'reason']);
+    assert.deepEqual(Object.keys(v.input.quantities[0]).sort(), [...QTY_INPUT_FIELDS_2026_04].sort());
+    assert.ok(typeof v.idempotencyKey === 'string' && v.idempotencyKey.length > 0);
+  }
+  assert.equal(guarded.input.quantities[0].changeFromQuantity, 5);
+  // The key must survive JSON serialization as null (not be dropped like `undefined`).
+  assert.ok('changeFromQuantity' in optOut.input.quantities[0]);
+  assert.equal(optOut.input.quantities[0].changeFromQuantity, null);
+});
