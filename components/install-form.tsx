@@ -5,7 +5,7 @@ import Link from 'next/link';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card } from '@/components/ui/card';
-import { ResourceHeader } from '@/components/resources/resource-shell';
+import { ResourceHeader } from '@/components/resources/resource-header';
 import { Store, Tag, Boxes, ShieldCheck, ArrowRight, Sparkles, FolderTree, RotateCcw, Wand2 } from 'lucide-react';
 
 function normalizeShop(raw: string): string | null {
