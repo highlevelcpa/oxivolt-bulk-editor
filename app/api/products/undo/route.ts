@@ -1,9 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getBearerToken, verifySessionToken, shopifyGraphQL } from '@/lib/shopify';
+import { getBearerToken, verifySessionToken, shopifyGraphQL, publicShopifyError } from '@/lib/shopify';
 import { getWorkingAccessToken, ReauthRequiredError } from '@/lib/access-token';
 import { requireActivePlan } from '@/lib/billing-guard';
 import { prisma } from '@/lib/db';
 import { QUANTITY_SCOPE_LOCATION, conflictMessage, revertQuantityGuarded } from '@/lib/inventory';
+import { validateRevertBody } from '@/lib/update-validate';
 
 export const dynamic = 'force-dynamic';
 
@@ -44,11 +45,11 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
-    const body = await req.json().catch(() => ({}));
-    const editLogId: string = typeof body?.editLogId === 'string' ? body.editLogId : '';
-    if (!editLogId) {
-      return NextResponse.json({ error: 'Missing editLogId' }, { status: 400 });
+    const parsed = validateRevertBody(await req.json().catch(() => null), 'undo');
+    if (!parsed.ok) {
+      return NextResponse.json({ error: parsed.error }, { status: 400 });
     }
+    const editLogId = parsed.id;
 
     const entry = await prisma.editLog.findFirst({ where: { id: editLogId, shop } });
     if (!entry) {
@@ -113,7 +114,7 @@ export async function POST(req: NextRequest) {
         locationId,
         target: Number(previous.quantity),
         expected: typeof written === 'number' ? written : null,
-        acceptCurrent: typeof body?.acceptCurrentQuantity === 'number' ? body.acceptCurrentQuantity : null,
+        acceptCurrent: parsed.acceptCurrentQuantity,
         legacySnapshot: previous?.quantityScope !== QUANTITY_SCOPE_LOCATION,
       });
       if (!inv.ok && 'conflict' in inv) {
@@ -150,7 +151,7 @@ export async function POST(req: NextRequest) {
         const err = firstError(d?.productUpdate?.userErrors);
         if (err) errorParts.push(`fields: ${err}`);
       } catch (e: any) {
-        errorParts.push(`fields: ${e?.message ?? 'error'}`);
+        errorParts.push(`fields: ${publicShopifyError(e)}`);
       }
     }
 
@@ -164,7 +165,7 @@ export async function POST(req: NextRequest) {
         const err = firstError(d?.productVariantsBulkUpdate?.userErrors);
         if (err) errorParts.push(`price: ${err}`);
       } catch (e: any) {
-        errorParts.push(`price: ${e?.message ?? 'error'}`);
+        errorParts.push(`price: ${publicShopifyError(e)}`);
       }
     }
 
@@ -178,6 +179,8 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({ success: true });
   } catch (e: any) {
-    return NextResponse.json({ error: e?.message ?? 'Undo failed' }, { status: 500 });
+    // Never echo internal error text (DB/driver messages, Shopify response bodies).
+    console.error('[products/undo] failed:', e?.name ?? 'Error');
+    return NextResponse.json({ error: 'Undo failed' }, { status: 500 });
   }
 }

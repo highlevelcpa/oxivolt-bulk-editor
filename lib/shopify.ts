@@ -107,6 +107,18 @@ export class ShopifyAuthError extends Error {
   }
 }
 
+// Safe, browser-facing text for an error thrown by shopifyGraphQL (or fetch). Shopify
+// GraphQL error messages are kept (merchant-actionable); raw HTTP response bodies and
+// unexpected internal messages are not echoed. Never includes the access token.
+export function publicShopifyError(e: any): string {
+  const msg = typeof e?.message === 'string' ? e.message : '';
+  const http = /^Shopify API error (\d{3})/.exec(msg);
+  if (http) return `Shopify API error ${http[1]}`;
+  if (msg.startsWith('Shopify GraphQL error:')) return msg.length > 300 ? `${msg.slice(0, 300)}…` : msg;
+  if (e instanceof TypeError) return 'network error contacting Shopify';
+  return 'unexpected error';
+}
+
 export async function shopifyGraphQL<T = any>(
   shop: string,
   accessToken: string,

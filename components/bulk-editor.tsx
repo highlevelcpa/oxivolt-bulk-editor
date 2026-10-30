@@ -66,6 +66,13 @@ type Product = {
 };
 
 const CHUNK_SIZE = 5;
+// Apply-batches sent per /api/products/preview call (server max is 20).
+const PREVIEW_GROUP = 20;
+// Positive plain decimal for the price factor (the server only sees the resulting price).
+const FACTOR_RE = /^\d+(\.\d+)?$/;
+
+type PreviewBatch = { updates: any[]; previewToken: string };
+type PreviewPlan = { updates: any[]; batches: PreviewBatch[] };
 // Categorizing is slower (an AI call per product), so use a smaller batch to keep
 // each request short and well within the App Bridge session-token lifetime.
 const CAT_CHUNK_SIZE = 3;
@@ -121,20 +128,24 @@ export default function BulkEditor({ shop, host }: { shop: string; host: string 
   const [billingError, setBillingError] = useState('');
   const [billingNotice, setBillingNotice] = useState<BillingNotice>(null);
 
-  // Which fields to edit
-  const [applyVendor, setApplyVendor] = useState(true);
-  const [applyPrice, setApplyPrice] = useState(true);
-  const [applyQuantity, setApplyQuantity] = useState(true);
+  // Which fields to edit. All OFF and all values empty by default: nothing is written
+  // unless the merchant explicitly enables a field and enters a value.
+  const [applyVendor, setApplyVendor] = useState(false);
+  const [applyPrice, setApplyPrice] = useState(false);
+  const [applyQuantity, setApplyQuantity] = useState(false);
 
   // Field values
-  const [vendor, setVendor] = useState('OXIVOLT');
+  const [vendor, setVendor] = useState('');
   const [priceMode, setPriceMode] = useState<'multiply' | 'fixed'>('multiply');
-  const [factor, setFactor] = useState('0.7');
-  const [fixedPrice, setFixedPrice] = useState('52.82');
-  const [quantity, setQuantity] = useState('100');
+  const [factor, setFactor] = useState('');
+  const [fixedPrice, setFixedPrice] = useState('');
+  const [quantity, setQuantity] = useState('');
 
-  // Preview + apply
+  // Preview + apply. Apply only ever sends the exact batches the server previewed and
+  // signed (POST /api/products/preview); the server rejects anything else.
   const [showPreview, setShowPreview] = useState(false);
+  const [previewPlan, setPreviewPlan] = useState<PreviewPlan | null>(null);
+  const [previewing, setPreviewing] = useState(false);
   const [applying, setApplying] = useState(false);
   const [progress, setProgress] = useState({ done: 0, total: 0 });
 
@@ -388,14 +399,21 @@ export default function BulkEditor({ shop, host }: { shop: string; host: string 
     });
   };
 
+  // The fixed price is sent exactly as typed (trimmed): an empty or malformed value is
+  // rejected by the server preview instead of silently becoming $0.00. The factor is
+  // checked here (> 0, no upper bound yet) because the server only sees the result.
+  const factorError =
+    applyPrice && priceMode === 'multiply' && !(FACTOR_RE.test(factor.trim()) && parseFloat(factor) > 0)
+      ? 'Enter a price factor greater than 0 (e.g. 0.9), or untick Price.'
+      : null;
   const computeNewPrice = useCallback(
     (p: Product): string => {
       if (!applyPrice) return money(p?.price);
-      if (priceMode === 'fixed') return money(fixedPrice);
-      const f = parseFloat(factor);
-      const base = parseFloat(p?.price ?? '0');
-      if (!isFinite(f) || !isFinite(base)) return money(p?.price);
-      return money(base * f);
+      if (priceMode === 'fixed') return fixedPrice.trim();
+      // A non-numeric base price must not silently become 0.00 (money() maps NaN to
+      // 0.00); send '' so the server rejects that product explicitly.
+      const n = parseFloat(p?.price ?? '') * parseFloat(factor);
+      return Number.isFinite(n) ? money(n) : '';
     },
     [applyPrice, priceMode, fixedPrice, factor],
   );
@@ -416,7 +434,14 @@ export default function BulkEditor({ shop, host }: { shop: string; host: string 
     setShowPlans(true);
   };
 
-  const handlePreview = () => {
+  const closePreview = () => {
+    setShowPreview(false);
+    setPreviewPlan(null);
+  };
+
+  // Builds the exact payload, has the server validate it and sign each apply-batch, and
+  // only then opens the confirmation modal (which shows exactly what will be sent).
+  const handlePreview = async () => {
     if (selectedProducts.length === 0) {
       toast.error('Select at least one product first.');
       return;
@@ -425,13 +450,45 @@ export default function BulkEditor({ shop, host }: { shop: string; host: string 
       toast.error('Enable at least one field to edit.');
       return;
     }
+    if (factorError) {
+      toast.error(factorError);
+      return;
+    }
     if (overLimit) {
       toast.error(
         `Your ${planInfo?.planName ?? 'Free'} plan is limited to ${productLimit} products. Upgrade to edit more.`,
       );
       return;
     }
-    setShowPreview(true);
+    const updates = selectedProducts.map(buildUpdate);
+    const chunks: any[][] = [];
+    for (let i = 0; i < updates.length; i += CHUNK_SIZE) chunks.push(updates.slice(i, i + CHUNK_SIZE));
+    setPreviewing(true);
+    try {
+      const batches: PreviewBatch[] = [];
+      for (let g = 0; g < chunks.length; g += PREVIEW_GROUP) {
+        const group = chunks.slice(g, g + PREVIEW_GROUP);
+        const res = await authFetch('/api/products/preview', {
+          method: 'POST',
+          body: JSON.stringify({ chunks: group }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !Array.isArray(data?.chunks) || data.chunks.length !== group.length) {
+          const itemError = Array.isArray(data?.chunks)
+            ? data.chunks.flatMap((c: any) => (Array.isArray(c?.results) ? c.results : [])).find((r: any) => r?.error)?.error
+            : null;
+          toast.error(`Nothing was changed. ${itemError ?? data?.error ?? 'Preview failed.'}`);
+          return;
+        }
+        group.forEach((c, i) => batches.push({ updates: c, previewToken: String(data.chunks[i]?.previewToken ?? '') }));
+      }
+      setPreviewPlan({ updates, batches });
+      setShowPreview(true);
+    } catch (e: any) {
+      toast.error(`Nothing was changed. ${e?.message ?? 'Network error'}`);
+    } finally {
+      setPreviewing(false);
+    }
   };
 
   const buildUpdate = (p: Product) => {
@@ -441,6 +498,8 @@ export default function BulkEditor({ shop, host }: { shop: string; host: string 
       variantId: p?.variantId,
       inventoryItemId: p?.inventoryItemId,
     };
+    // Values are sent as entered; the server trims and validates them and rejects empty
+    // or malformed input (nothing is coerced to 0 / null on the client).
     if (applyVendor) {
       u.vendor = vendor;
       u.prevVendor = p?.vendor ?? '';
@@ -450,14 +509,15 @@ export default function BulkEditor({ shop, host }: { shop: string; host: string 
       u.prevPrice = money(p?.price);
     }
     if (applyQuantity) {
-      u.quantity = parseInt(quantity, 10);
+      u.quantity = quantity.trim();
       u.prevQuantity = typeof p?.inventoryQuantity === 'number' ? p.inventoryQuantity : (p?.totalInventory ?? 0);
     }
     return u;
   };
 
   const handleApply = async () => {
-    if (selectedProducts.length === 0 || noFieldSelected) return;
+    const plan = previewPlan;
+    if (!plan || plan.batches.length === 0) return;
     if (overLimit) {
       toast.error(
         `Your ${planInfo?.planName ?? 'Free'} plan is limited to ${productLimit} products. Upgrade to edit more.`,
@@ -465,22 +525,29 @@ export default function BulkEditor({ shop, host }: { shop: string; host: string 
       return;
     }
     setApplying(true);
-    setShowPreview(false);
-    setProgress({ done: 0, total: selectedProducts.length });
+    closePreview();
+    const total = plan.updates.length;
+    setProgress({ done: 0, total });
 
     let okCount = 0;
     let failCount = 0;
+    let done = 0;
     const failures: string[] = [];
 
-    const updates = selectedProducts.map(buildUpdate);
-    for (let i = 0; i < updates.length; i += CHUNK_SIZE) {
-      const chunk = updates.slice(i, i + CHUNK_SIZE);
+    for (const batch of plan.batches) {
+      const chunk = batch.updates;
       try {
         const res = await authFetch('/api/products/update', {
           method: 'POST',
-          body: JSON.stringify({ updates: chunk }),
+          body: JSON.stringify({ updates: chunk, previewToken: batch.previewToken }),
         });
         const data = await res.json().catch(() => ({}));
+        if (typeof data?.code === 'string' && data.code.startsWith('preview_')) {
+          // Expired / mismatched preview: stop; nothing in this or later batches was sent.
+          failCount += total - done;
+          failures.push(data?.error ?? 'Preview the changes again.');
+          break;
+        }
         if (res.status === 401 && data?.error === 'reauth_required') {
           setApplying(false);
           toast.info('Updating app permissions... redirecting to Shopify.');
@@ -509,7 +576,8 @@ export default function BulkEditor({ shop, host }: { shop: string; host: string 
         failCount += chunk.length;
         failures.push(e?.message ?? 'Network error');
       }
-      setProgress({ done: Math.min(i + chunk.length, updates.length), total: updates.length });
+      done += chunk.length;
+      setProgress({ done, total });
     }
 
     setApplying(false);
@@ -1180,7 +1248,7 @@ export default function BulkEditor({ shop, host }: { shop: string; host: string 
                   value={vendor}
                   onChange={(e) => setVendor(e?.target?.value ?? '')}
                   disabled={!applyVendor}
-                  placeholder="OXIVOLT"
+                  placeholder="Vendor name"
                 />
               </div>
 
@@ -1226,7 +1294,7 @@ export default function BulkEditor({ shop, host }: { shop: string; host: string 
                       value={factor}
                       onChange={(e) => setFactor(e?.target?.value ?? '')}
                       disabled={!applyPrice}
-                      placeholder="0.7"
+                      placeholder="e.g. 0.9"
                     />
                     <p className="mt-1 text-xs text-muted-foreground">
                       New price = current price × factor
@@ -1240,7 +1308,7 @@ export default function BulkEditor({ shop, host }: { shop: string; host: string 
                       value={fixedPrice}
                       onChange={(e) => setFixedPrice(e?.target?.value ?? '')}
                       disabled={!applyPrice}
-                      placeholder="52.82"
+                      placeholder="e.g. 19.99"
                     />
                     <p className="mt-1 text-xs text-muted-foreground">Same price for all selected</p>
                   </div>
@@ -1264,7 +1332,7 @@ export default function BulkEditor({ shop, host }: { shop: string; host: string 
                   value={quantity}
                   onChange={(e) => setQuantity(e?.target?.value ?? '')}
                   disabled={!applyQuantity}
-                  placeholder="100"
+                  placeholder="e.g. 100"
                 />
               </div>
 
@@ -1289,14 +1357,15 @@ export default function BulkEditor({ shop, host }: { shop: string; host: string 
                   onClick={handlePreview}
                   variant="outline"
                   className="w-full"
-                  disabled={applying || loading || categorizing || enhancing || runningAll || overLimit}
+                  disabled={applying || previewing || loading || categorizing || enhancing || runningAll || overLimit}
                 >
-                  <Eye className="mr-2 h-4 w-4" /> Preview changes
+                  {previewing ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Eye className="mr-2 h-4 w-4" />} Preview changes
                 </Button>
+                {/* Apply always goes through the server preview + confirmation modal. */}
                 <Button
-                  onClick={handleApply}
+                  onClick={handlePreview}
                   className="w-full"
-                  disabled={applying || loading || categorizing || enhancing || runningAll || selected.size === 0 || noFieldSelected || overLimit}
+                  disabled={applying || previewing || loading || categorizing || enhancing || runningAll || selected.size === 0 || noFieldSelected || overLimit}
                 >
                   {applying ? (
                     <Loader2 className="mr-2 h-4 w-4 animate-spin" />
@@ -1488,51 +1557,50 @@ export default function BulkEditor({ shop, host }: { shop: string; host: string 
       </div>
 
       {/* Preview modal */}
-      {showPreview ? (
+      {showPreview && previewPlan ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
           <Card className="flex max-h-[85vh] w-full max-w-2xl flex-col overflow-hidden p-0 shadow-2xl">
             <div className="flex items-center justify-between border-b border-border px-5 py-4">
               <h3 className="font-display text-lg font-semibold">Preview changes</h3>
-              <Button variant="ghost" size="icon" onClick={() => setShowPreview(false)}>
+              <Button variant="ghost" size="icon" onClick={closePreview}>
                 <X className="h-4 w-4" />
               </Button>
             </div>
             <div className="flex-1 overflow-y-auto px-5 py-3">
               <p className="mb-3 text-sm text-muted-foreground">
-                {selectedProducts.length} product{selectedProducts.length === 1 ? '' : 's'} will be
-                updated. Showing first {Math.min(selectedProducts.length, 50)}.
+                {previewPlan.updates.length} product{previewPlan.updates.length === 1 ? '' : 's'} will be
+                updated. Showing first {Math.min(previewPlan.updates.length, 50)}.
               </p>
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b border-border text-left text-xs text-muted-foreground">
                     <th className="py-2 pr-2">Product</th>
-                    {applyVendor ? <th className="py-2 px-2">Vendor</th> : null}
-                    {applyPrice ? <th className="py-2 px-2">Price</th> : null}
-                    {applyQuantity ? <th className="py-2 pl-2">Qty</th> : null}
+                    {'vendor' in (previewPlan.updates[0] ?? {}) ? <th className="py-2 px-2">Vendor</th> : null}
+                    {'price' in (previewPlan.updates[0] ?? {}) ? <th className="py-2 px-2">Price</th> : null}
+                    {'quantity' in (previewPlan.updates[0] ?? {}) ? <th className="py-2 pl-2">Qty</th> : null}
                   </tr>
                 </thead>
                 <tbody>
-                  {selectedProducts.slice(0, 50).map((p) => (
-                    <tr key={p?.id} className="border-b border-border/60">
-                      <td className="max-w-[200px] truncate py-2 pr-2">{p?.title}</td>
-                      {applyVendor ? (
+                  {/* Rendered from the exact payload the server validated and signed. */}
+                  {previewPlan.updates.slice(0, 50).map((u) => (
+                    <tr key={u?.productId} className="border-b border-border/60">
+                      <td className="max-w-[200px] truncate py-2 pr-2">{u?.title}</td>
+                      {'vendor' in u ? (
                         <td className="py-2 px-2">
-                          <span className="text-muted-foreground line-through">{p?.vendor || '—'}</span>{' '}
-                          <span className="font-medium text-primary">{vendor}</span>
+                          <span className="text-muted-foreground line-through">{u?.prevVendor || '—'}</span>{' '}
+                          <span className="font-medium text-primary">{String(u.vendor).trim()}</span>
                         </td>
                       ) : null}
-                      {applyPrice ? (
+                      {'price' in u ? (
                         <td className="py-2 px-2 font-mono">
-                          <span className="text-muted-foreground line-through">${money(p?.price)}</span>{' '}
-                          <span className="font-medium text-primary">${computeNewPrice(p)}</span>
+                          <span className="text-muted-foreground line-through">${u?.prevPrice}</span>{' '}
+                          <span className="font-medium text-primary">${u.price}</span>
                         </td>
                       ) : null}
-                      {applyQuantity ? (
+                      {'quantity' in u ? (
                         <td className="py-2 pl-2 font-mono">
-                          <span className="text-muted-foreground line-through">
-                            {p?.inventoryQuantity ?? 0}
-                          </span>{' '}
-                          <span className="font-medium text-primary">{parseInt(quantity, 10) || 0}</span>
+                          <span className="text-muted-foreground line-through">{u?.prevQuantity ?? 0}</span>{' '}
+                          <span className="font-medium text-primary">{u.quantity}</span>
                         </td>
                       ) : null}
                     </tr>
@@ -1541,10 +1609,10 @@ export default function BulkEditor({ shop, host }: { shop: string; host: string 
               </table>
             </div>
             <div className="flex items-center justify-end gap-2 border-t border-border px-5 py-4">
-              <Button variant="outline" onClick={() => setShowPreview(false)}>
+              <Button variant="outline" onClick={closePreview}>
                 Cancel
               </Button>
-              <Button onClick={handleApply}>
+              <Button onClick={handleApply} disabled={applying}>
                 <CheckCircle2 className="mr-2 h-4 w-4" /> Confirm &amp; apply
               </Button>
             </div>

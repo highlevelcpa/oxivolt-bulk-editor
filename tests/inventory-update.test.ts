@@ -196,6 +196,7 @@ let updatePOST: (req: any) => Promise<Response>;
 let undoPOST: (req: any) => Promise<Response>;
 let restorePOST: (req: any) => Promise<Response>;
 let NextRequestCtor: any;
+let signPreview: (shop: string, updates: unknown) => { token: string };
 
 before(async () => {
   (globalThis as any).fetch = fetchMock;
@@ -203,6 +204,7 @@ before(async () => {
   updatePOST = (await import('../app/api/products/update/route')).POST;
   undoPOST = (await import('../app/api/products/undo/route')).POST;
   restorePOST = (await import('../app/api/products/restore/route')).POST;
+  signPreview = (await import('../lib/preview-token')).signPreviewToken;
 });
 
 beforeEach(() => {
@@ -228,8 +230,12 @@ function request(path: string, body: any) {
   });
 }
 
+// Apply requires a server-issued preview token for the exact `updates` (lib/preview-token.ts).
+// These flow tests sign one directly; tests/bulk-edit-safety.test.ts covers the
+// preview endpoint and every rejection path of the token check.
 async function postUpdate(updates: any[]) {
-  const res = await updatePOST(request('/api/products/update', { updates }));
+  const previewToken = signPreview(SHOP, updates).token;
+  const res = await updatePOST(request('/api/products/update', { updates, previewToken }));
   const text = await res.text();
   return { status: res.status, text, json: JSON.parse(text) };
 }
@@ -395,8 +401,10 @@ test('network failure and HTTP 5xx are reported per product without leaking the 
   };
   const { json, text } = await postUpdate([product(1, { quantity: 10 }), product(2, { quantity: 10 })]);
   assert.deepEqual(json.results.map((r: any) => r.success), [false, false]);
-  assert.equal(json.results[0].error, 'quantity: fetch failed');
-  assert.match(json.results[1].error, /quantity: Shopify API error 500/);
+  assert.equal(json.results[0].error, 'quantity: network error contacting Shopify');
+  // HTTP status only; the raw Shopify response body is not echoed to the browser.
+  assert.equal(json.results[1].error, 'quantity: Shopify API error 500');
+  assert.ok(!text.includes('Internal Server Error'));
   assert.ok(!text.includes(ACCESS_TOKEN));
   assert.ok(!JSON.stringify(editLogs).includes(ACCESS_TOKEN));
   assert.deepEqual(usageIncrements, []);
@@ -423,12 +431,15 @@ for (const bad of ['abc', 1.5, '12.7', {}]) {
   });
 }
 
-test('missing inventory item id fails that product only', async () => {
-  const { json } = await postUpdate([product(1, { quantity: 3, inventoryItemId: null }), product(2, { quantity: 3 })]);
+test('missing inventory item id rejects the whole request (all-or-nothing), nothing is written', async () => {
+  const { status, json } = await postUpdate([product(1, { quantity: 3, inventoryItemId: null }), product(2, { quantity: 3 })]);
+  assert.equal(status, 400);
+  assert.equal(json.code, 'invalid_updates');
   assert.equal(json.results[0].success, false);
   assert.equal(json.results[0].error, 'quantity: missing inventory item id for this product');
-  assert.equal(json.results[1].success, true);
-  assert.equal(callsOf('invSet').length, 1);
+  assert.equal(json.results[1].success, false);
+  assert.equal(json.results[1].error, null);
+  assert.equal(calls.length, 0);
 });
 
 test('missing product id and empty update list are rejected', async () => {
@@ -810,4 +821,191 @@ test('legacy multi-location row whose stock ALSO changed reports legacy_multi_lo
   assert.equal((await ok.json()).success, true);
   assert.equal(callsOf('invSet')[0].variables.input.quantities[0].changeFromQuantity, 13);
   assert.equal(levels['gid://shopify/InventoryItem/1'], 40);
+});
+
+// ---------------------------------------------------------------------------
+// 9. Server-side request validation (lib/update-validate.ts)
+//
+// `forbidWrites()` turns every Shopify write mutation into a recorded violation, so a
+// test fails if invalid input ever reaches productUpdate / productVariantsBulkUpdate /
+// inventoryItemUpdate / inventoryActivate / inventorySetQuantities.
+// ---------------------------------------------------------------------------
+const WRITE_OPS = ['productUpdate', 'variantPrice', 'invItemUpdate', 'invActivate', 'invSet'];
+let writeViolations: string[] = [];
+function forbidWrites(allow: (op: string, vars: any) => boolean = () => false) {
+  writeViolations = [];
+  for (const op of WRITE_OPS) {
+    overrides[op] = (vars) => {
+      if (allow(op, vars)) return defaultHandler(op, vars, op === 'invSet' ? 'inventorySetQuantities(input: $input) @idempotent(key: $idempotencyKey)' : '');
+      writeViolations.push(`${op} ${JSON.stringify(vars)}`);
+      return { errors: [{ message: `TEST VIOLATION: ${op} must not be called` }] };
+    };
+  }
+}
+const writesFor = (n: number) =>
+  calls.filter((c) => WRITE_OPS.includes(opName(c.query)) && JSON.stringify(c.variables).match(new RegExp(`/(Product|ProductVariant|InventoryItem)/${n}"`)));
+
+const INVALID_ITEMS: [string, Record<string, any>][] = [
+  ['empty price', { price: '' }],
+  ['whitespace price', { price: '   ' }],
+  ['non-numeric price', { price: 'abc' }],
+  ['negative price', { price: '-5' }],
+  ['exponent price', { price: '1e3' }],
+  ['currency-symbol price', { price: '$10' }],
+  ['thousands-separator price', { price: '1,000.00' }],
+  ['NaN-like price', { price: 'NaN' }],
+  ['negative numeric price', { price: -1 }],
+  ['price object', { price: {} }],
+  ['price without variant id', { price: '10.00', variantId: null }],
+  ['price with malformed variant id', { price: '10.00', variantId: 'not-a-gid' }],
+  ['empty quantity', { quantity: '' }],
+  ['whitespace quantity', { quantity: '  ' }],
+  ['negative quantity', { quantity: -1 }],
+  ['negative string quantity', { quantity: '-3' }],
+  ['fractional quantity', { quantity: 2.5 }],
+  ['exponent quantity', { quantity: '1e3' }],
+  ['boolean quantity', { quantity: true }],
+  ['huge quantity', { quantity: 1_000_000_001 }],
+  ['quantity with malformed inventory item id', { quantity: 3, inventoryItemId: 'abc' }],
+  ['empty vendor', { vendor: '' }],
+  ['whitespace vendor', { vendor: '   ' }],
+  ['non-text vendor', { vendor: 42 }],
+  ['over-long vendor', { vendor: 'x'.repeat(256) }],
+  ['invalid status', { status: 'deleted' }],
+  ['empty product type', { productType: '' }],
+  ['tags not a list', { tags: 'a,b' }],
+  ['empty tag', { tags: ['ok', ''] }],
+  ['no requested change', {}],
+  ['malformed previous price (Undo snapshot)', { price: '5.00', prevPrice: 'abc' }],
+];
+
+for (const [label, extra] of INVALID_ITEMS) {
+  test(`validation: ${label} alone → 400, zero Shopify calls, nothing logged or counted`, async () => {
+    forbidWrites();
+    const { status, json } = await postUpdate([product(1, extra)]);
+    assert.equal(status, 400);
+    assert.equal(json.code, 'no_valid_updates');
+    assert.equal(json.results.length, 1);
+    assert.equal(json.results[0].success, false);
+    assert.equal(json.results[0].productId, 'gid://shopify/Product/1');
+    assert.ok(typeof json.results[0].error === 'string' && json.results[0].error.length > 0);
+    assert.deepEqual(writeViolations, []);
+    assert.equal(calls.length, 0, 'no Shopify call at all (not even the token probe or billing gate)');
+    assert.deepEqual(editLogs, []);
+    assert.deepEqual(usageIncrements, []);
+  });
+
+  test(`validation: ${label} next to a valid item → whole request rejected, nothing written`, async () => {
+    forbidWrites();
+    const { status, json } = await postUpdate([product(1, extra), product(2, { quantity: 4, price: '9.99', vendor: 'ACME' })]);
+    assert.equal(status, 400);
+    assert.equal(json.code, 'invalid_updates');
+    assert.equal(json.results[0].success, false);
+    assert.equal(json.results[0].productId, 'gid://shopify/Product/1');
+    assert.ok(json.results[0].error);
+    assert.equal(json.results[1].success, false);
+    assert.equal(json.results[1].error, null, 'the valid item is not blamed, just not applied');
+    assert.deepEqual(writeViolations, []);
+    assert.equal(writesFor(2).length, 0);
+    assert.equal(calls.length, 0);
+    assert.deepEqual(editLogs, []);
+    assert.deepEqual(usageIncrements, []);
+  });
+}
+
+test('validation: specific error messages for price, quantity and vendor', async () => {
+  const { json } = await postUpdate([
+    product(1, { price: '' }),
+    product(2, { quantity: '' }),
+    product(3, { quantity: -1 }),
+    product(4, { vendor: '  ' }),
+    product(5, { price: '1.00', variantId: null }),
+    product(6, {}),
+  ]);
+  assert.match(json.results[0].error, /^price: invalid price/);
+  assert.equal(json.results[1].error, 'quantity: invalid quantity (must be a whole number)');
+  assert.equal(json.results[2].error, 'quantity: invalid quantity (must be between 0 and 1000000000)');
+  assert.equal(json.results[3].error, 'vendor: cannot be empty');
+  assert.equal(json.results[4].error, 'price: missing or invalid variant id for this product');
+  assert.equal(json.results[5].error, 'No changes requested for this product');
+});
+
+test('validation: quantity 0 (number and "0") is a valid absolute value and is written', async () => {
+  forbidWrites((op) => op !== 'productUpdate' && op !== 'variantPrice');
+  levels['gid://shopify/InventoryItem/1'] = 5;
+  levels['gid://shopify/InventoryItem/2'] = 5;
+  const { status, json } = await postUpdate([product(1, { quantity: 0 }), product(2, { quantity: '0' })]);
+  assert.equal(status, 200);
+  assert.ok(json.results.every((r: any) => r.success));
+  assert.deepEqual(callsOf('invSet').map((c) => c.variables.input.quantities[0].quantity), [0, 0]);
+  assert.deepEqual(writeViolations, []);
+});
+
+test('validation: price "0" / "0.00" and a numeric price are valid and sent as strings', async () => {
+  const { json } = await postUpdate([product(1, { price: '0' }), product(2, { price: '0.00' }), product(3, { price: 12.5 })]);
+  assert.ok(json.results.every((r: any) => r.success));
+  assert.deepEqual(callsOf('variantPrice').map((c) => c.variables.variants[0].price), ['0', '0.00', '12.5']);
+});
+
+test('validation: vendor is trimmed before it is sent to Shopify', async () => {
+  await postUpdate([product(1, { vendor: '  ACME  ' })]);
+  assert.equal(callsOf('productUpdate')[0].variables.product.vendor, 'ACME');
+});
+
+test('validation: request with only invalid items, mixed kinds → 400 and zero Shopify calls', async () => {
+  forbidWrites();
+  const { status, json } = await postUpdate([
+    product(1, { price: 'abc' }),
+    product(2, { quantity: -2 }),
+    product(3, { vendor: '' }),
+    { quantity: 3 },
+    null,
+    'garbage',
+  ]);
+  assert.equal(status, 400);
+  assert.equal(json.code, 'no_valid_updates');
+  assert.equal(json.results.length, 6);
+  assert.ok(json.results.every((r: any) => r.success === false && r.error));
+  assert.equal(calls.length, 0);
+  assert.deepEqual(writeViolations, []);
+});
+
+test('validation: malformed body shapes are rejected before any Shopify call', async () => {
+  for (const body of [{}, { updates: null }, { updates: 'x' }, { updates: {} }]) {
+    calls = [];
+    const res = await updatePOST(request('/api/products/update', body));
+    assert.equal(res.status, 400);
+    assert.equal((await res.json()).error, 'No updates provided');
+    assert.equal(calls.length, 0);
+  }
+  calls = [];
+  const raw = new NextRequestCtor('http://localhost/api/products/update', {
+    method: 'POST',
+    headers: { authorization: `Bearer ${sessionToken()}`, 'content-type': 'application/json' },
+    body: '{not json',
+  });
+  const res = await updatePOST(raw);
+  assert.equal(res.status, 400);
+  assert.equal(calls.length, 0);
+});
+
+test('validation: more than 50 items in one request → 400 too_many_updates, zero Shopify calls', async () => {
+  forbidWrites();
+  const many = Array.from({ length: 51 }, (_, i) => product(i + 1, { vendor: 'ACME' }));
+  const { status, json } = await postUpdate(many);
+  assert.equal(status, 400);
+  assert.equal(json.code, 'too_many_updates');
+  assert.equal(calls.length, 0);
+});
+
+test('validation: unauthenticated request is rejected before validation or any Shopify call', async () => {
+  const res = await updatePOST(
+    new NextRequestCtor('http://localhost/api/products/update', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ updates: [product(1, { price: 'abc' })] }),
+    }),
+  );
+  assert.equal(res.status, 401);
+  assert.equal(calls.length, 0);
 });
