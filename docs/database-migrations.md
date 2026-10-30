@@ -4,7 +4,7 @@
 
 | Before | After |
 |---|---|
-| Container start ran `prisma db push --skip-generate` against whatever `DATABASE_URL` pointed at | Container start runs `scripts/preflight.ts`, then `next start` |
+| Container start ran `prisma db push --skip-generate` against whatever `DATABASE_URL` pointed at | Container start runs `scripts/preflight.ts`, then `exec ./node_modules/.bin/next start` (no `yarn` at runtime, so no Corepack download of Yarn on every start; works without internet access) |
 | No migration history | `prisma/migrations/0_init` baseline (byte-identical to `prisma migrate diff --from-empty --to-schema-datamodel`) |
 | No guard against STAGING using production resources | `lib/env-guard.ts` (runtime + preflight) fails closed in non-production |
 | No CI check | `ci/db-migrations.workflow.yml` → `scripts/check-migrations.sh` on disposable Postgres 18 (**inactive until moved to `.github/workflows/db-migrations.yml`** — the PR bot lacks the GitHub `workflows` permission) |
@@ -59,3 +59,14 @@ yarn db:check-migrations
 ```
 
 The script refuses non-loopback hosts, Railway environments and `OXIVOLT_ENV=production`.
+
+### Activating the GitHub Actions check (repository owner only)
+
+GitHub only lets a credential with the `workflow` scope (or a GitHub App with the
+`workflows` permission) create files under `.github/workflows/`. The bot that
+prepared this PR does not have it, so the workflow is shipped under `ci/`.
+To activate it, a repository admin copies the file unchanged, e.g. in the
+GitHub web UI: **Add file → Create new file** on branch
+`chore/prisma-migrate-baseline`, path `.github/workflows/db-migrations.yml`,
+content = `ci/db-migrations.workflow.yml`. The workflow uses only a disposable
+`postgres:18` service container and references no repository secrets.

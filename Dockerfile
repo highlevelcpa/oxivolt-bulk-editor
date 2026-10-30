@@ -41,4 +41,8 @@ ENV PORT=3000
 # scripts/preflight.ts: production -> no-op; non-production -> DB/Shopify
 # environment guard, then `prisma migrate deploy` only if OXIVOLT_RUN_MIGRATIONS=true.
 # See docs/database-migrations.md.
-CMD ["sh", "-c", "node --import tsx scripts/preflight.ts && yarn start -p ${PORT:-3000}"]
+# The server is started via the locally installed Next.js binary (same as
+# `yarn start` = `next start`) so container start never needs Corepack to
+# download Yarn from the internet; `exec` makes Next.js PID 1 so it receives
+# SIGTERM directly on stop/restart.
+CMD ["sh", "-c", "node --import tsx scripts/preflight.ts && exec ./node_modules/.bin/next start -p \"${PORT:-3000}\""]

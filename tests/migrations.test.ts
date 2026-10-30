@@ -32,6 +32,10 @@ test('container startup no longer runs `prisma db push` and goes through the pre
   assert.doesNotMatch(cmd, /db push/);
   assert.doesNotMatch(cmd, /migrate (reset|dev|resolve)/);
   assert.match(cmd, /scripts\/preflight\.ts/);
+  // Preflight must gate server start (`&&`), and start must not depend on
+  // Corepack downloading Yarn at runtime (offline-safe container start).
+  assert.match(cmd, /preflight\.ts && exec \.\/node_modules\/\.bin\/next start\b/);
+  assert.doesNotMatch(cmd, /\b(yarn|npx|corepack)\b/);
   const pkg = JSON.parse(read('package.json'));
   for (const [name, script] of Object.entries<string>(pkg.scripts)) {
     assert.doesNotMatch(script, /db push|migrate reset|--force-reset|--accept-data-loss/, `script "${name}"`);
