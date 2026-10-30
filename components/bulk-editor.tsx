@@ -173,6 +173,7 @@ export default function BulkEditor({ shop, host }: { shop: string; host: string 
   const loadProducts = useCallback(async () => {
     setLoading(true);
     setLoadError('');
+    setListTruncated(false);
     try {
       const res = await authFetch('/api/products', { method: 'GET' });
       if (res.status === 402) {
