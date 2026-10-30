@@ -112,6 +112,8 @@ export default function BulkEditor({ shop, host }: { shop: string; host: string 
   const [products, setProducts] = useState<Product[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState('');
+  // True when the server hit its product page cap and the list is incomplete.
+  const [listTruncated, setListTruncated] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [planInfo, setPlanInfo] = useState<PlanInfo | null>(null);
   const [planLoading, setPlanLoading] = useState(true);
@@ -171,6 +173,7 @@ export default function BulkEditor({ shop, host }: { shop: string; host: string 
   const loadProducts = useCallback(async () => {
     setLoading(true);
     setLoadError('');
+    setListTruncated(false);
     try {
       const res = await authFetch('/api/products', { method: 'GET' });
       if (res.status === 402) {
@@ -201,6 +204,7 @@ export default function BulkEditor({ shop, host }: { shop: string; host: string 
         return;
       }
       setProducts(Array.isArray(data?.products) ? data.products : []);
+      setListTruncated(data?.truncated === true);
       setPage(0);
     } catch (e: any) {
       setLoadError(e?.message ?? 'Failed to load products.');
@@ -1022,6 +1026,19 @@ export default function BulkEditor({ shop, host }: { shop: string; host: string 
                 ) : null}
               </div>
             </div>
+
+            {!loading && !loadError && listTruncated ? (
+              <div
+                role="status"
+                className="flex items-start gap-2 border-b border-border bg-amber-50 px-4 py-3 text-sm text-amber-900"
+              >
+                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                <span>
+                  Only the first {products.length.toLocaleString()} products (sorted by title) were loaded. Products
+                  beyond this limit are not shown, are not included in search or Select all, and cannot be edited here.
+                </span>
+              </div>
+            ) : null}
 
             <div className="flex items-center justify-between gap-2 border-b border-border bg-secondary/40 px-4 py-3">
               <div className="flex items-center gap-3">

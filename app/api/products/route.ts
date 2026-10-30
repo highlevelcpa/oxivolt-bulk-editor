@@ -5,6 +5,9 @@ import { requireActivePlan } from '@/lib/billing-guard';
 
 export const dynamic = 'force-dynamic';
 
+// 30 pages x 100 products = at most 3,000 products per load.
+const MAX_PAGES = 30;
+
 const PRODUCTS_QUERY = `
   query Products($cursor: String) {
     products(first: 100, after: $cursor, sortKey: TITLE) {
@@ -62,7 +65,7 @@ export async function GET(req: NextRequest) {
     let hasNext = true;
     let pages = 0;
 
-    while (hasNext && pages < 30) {
+    while (hasNext && pages < MAX_PAGES) {
       const data: any = await shopifyGraphQL(shop, accessToken, PRODUCTS_QUERY, { cursor });
       const conn = data?.products;
       const edges = conn?.edges ?? [];
@@ -92,7 +95,9 @@ export async function GET(req: NextRequest) {
       pages += 1;
     }
 
-    return NextResponse.json({ shop, products, count: products.length });
+    // `truncated` tells the UI that the store has more products than were
+    // loaded (page cap reached), so the list is not the whole catalog.
+    return NextResponse.json({ shop, products, count: products.length, truncated: hasNext });
   } catch (e: any) {
     return NextResponse.json({ error: e?.message ?? 'Failed to load products' }, { status: 500 });
   }
