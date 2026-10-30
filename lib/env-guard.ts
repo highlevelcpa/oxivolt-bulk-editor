@@ -138,11 +138,20 @@ export function checkDatabaseTarget(env: Env, resolved: Extract<Resolved, { kind
 /**
  * Non-production Shopify rule: SHOPIFY_API_KEY (the public client id) must not
  * be one of OXIVOLT_FORBIDDEN_SHOPIFY_API_KEYS (set this to the production app's
- * client id in STAGING). No-op when the deny-list is empty.
+ * client id in STAGING). On Railway (STAGING) the deny-list is REQUIRED — fail
+ * closed so a forgotten variable cannot let STAGING run with the production
+ * Shopify app. Off Railway (local dev / CI) an empty deny-list is allowed.
  */
 export function checkShopifyApp(env: Env, resolved: Extract<Resolved, { kind: 'non-production' }>): void {
+  const forbidden = list(env.OXIVOLT_FORBIDDEN_SHOPIFY_API_KEYS);
+  if (resolved.onRailway && forbidden.length === 0) {
+    throw new EnvGuardError(
+      `${resolved.name} (${resolved.source}): OXIVOLT_FORBIDDEN_SHOPIFY_API_KEYS is empty — refused. ` +
+        'Set it to the PRODUCTION Shopify app client id so this environment cannot run with production credentials.',
+    );
+  }
   const key = env.SHOPIFY_API_KEY?.trim().toLowerCase();
-  if (key && list(env.OXIVOLT_FORBIDDEN_SHOPIFY_API_KEYS).includes(key)) {
+  if (key && forbidden.includes(key)) {
     throw new EnvGuardError(
       `${resolved.name} (${resolved.source}): SHOPIFY_API_KEY is the PRODUCTION Shopify app — refused. Use a separate development app.`,
     );

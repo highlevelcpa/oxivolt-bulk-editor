@@ -18,6 +18,7 @@ DATABASE_URL=<your_postgresql_connection_string>
 #                               (loopback hosts are implicitly allowed off Railway;
 #                                postgres.railway.internal and *.proxy.rlwy.net are always refused)
 #   OXIVOLT_FORBIDDEN_SHOPIFY_API_KEYS  comma list — set to the PRODUCTION app client id in STAGING
+#                               (REQUIRED on Railway non-production: empty -> container refuses to start)
 #   OXIVOLT_RUN_MIGRATIONS      true -> run `prisma migrate deploy` at container start (non-production only)
 # OXIVOLT_ENV=staging
 # OXIVOLT_DB_ALLOWED_HOSTS=postgres-staging-v2.railway.internal

@@ -15,7 +15,7 @@
 |---|---|
 | `production` | **No database operation at all.** Migration requests are logged and ignored. Exit 0 → app starts. |
 | unknown (neither variable set) | Guard skipped; any migration request is refused (exit 1). |
-| non-production (`STAGING`, `development`, `test`) | `DATABASE_URL` host must be in `OXIVOLT_DB_ALLOWED_HOSTS` (loopback implicitly allowed off Railway); `postgres.railway.internal` and `*.proxy.rlwy.net` always refused; `SHOPIFY_API_KEY` must not be in `OXIVOLT_FORBIDDEN_SHOPIFY_API_KEYS`. Then `prisma migrate deploy` **only** if `OXIVOLT_RUN_MIGRATIONS=true`. Any violation → exit 1, app does not start. |
+| non-production (`STAGING`, `development`, `test`) | `DATABASE_URL` host must be in `OXIVOLT_DB_ALLOWED_HOSTS` (loopback implicitly allowed off Railway); `postgres.railway.internal` and `*.proxy.rlwy.net` always refused; `SHOPIFY_API_KEY` must not be in `OXIVOLT_FORBIDDEN_SHOPIFY_API_KEYS`, and on Railway (STAGING) that deny-list is **required** (empty → refused). Then `prisma migrate deploy` **only** if `OXIVOLT_RUN_MIGRATIONS=true`. Any violation → exit 1, app does not start. |
 
 `lib/db.ts` re-applies the database rule at runtime before creating `PrismaClient`, so a STAGING deployment that bypasses the preflight still cannot open a connection to a non-allow-listed host.
 

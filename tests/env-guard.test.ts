@@ -101,7 +101,34 @@ test('checkShopifyApp refuses the production Shopify client id in non-production
   if (resolved.kind !== 'non-production') return;
   assert.throws(() => checkShopifyApp({ SHOPIFY_API_KEY: 'PRODKEY', OXIVOLT_FORBIDDEN_SHOPIFY_API_KEYS: 'prodkey' }, resolved), /PRODUCTION Shopify app/);
   assert.doesNotThrow(() => checkShopifyApp({ SHOPIFY_API_KEY: 'devkey', OXIVOLT_FORBIDDEN_SHOPIFY_API_KEYS: 'prodkey' }, resolved));
-  assert.doesNotThrow(() => checkShopifyApp({ SHOPIFY_API_KEY: 'devkey' }, resolved));
+  assert.throws(() => checkShopifyApp({ SHOPIFY_API_KEY: 'prodkey', OXIVOLT_FORBIDDEN_SHOPIFY_API_KEYS: ' other , PRODKEY ' }, resolved), /PRODUCTION Shopify app/);
+});
+
+test('checkShopifyApp fails closed on Railway STAGING when the production-key deny-list is missing', () => {
+  const staging = resolveEnvironment({ RAILWAY_ENVIRONMENT_NAME: 'STAGING' });
+  const local = resolveEnvironment({ OXIVOLT_ENV: 'development' });
+  assert.ok(staging.kind === 'non-production' && local.kind === 'non-production');
+  if (staging.kind !== 'non-production' || local.kind !== 'non-production') return;
+  assert.throws(() => checkShopifyApp({ SHOPIFY_API_KEY: 'prodkey' }, staging), /OXIVOLT_FORBIDDEN_SHOPIFY_API_KEYS is empty/);
+  assert.throws(() => checkShopifyApp({ SHOPIFY_API_KEY: 'prodkey', OXIVOLT_FORBIDDEN_SHOPIFY_API_KEYS: ' , ' }, staging), /is empty/);
+  // Off Railway (local dev / CI) the deny-list stays optional.
+  assert.doesNotThrow(() => checkShopifyApp({ SHOPIFY_API_KEY: 'devkey' }, local));
+});
+
+test('preflight: Railway STAGING with an allowed DB but no Shopify deny-list is refused before any migration', () => {
+  const r = preflight(
+    {
+      RAILWAY_ENVIRONMENT_NAME: 'STAGING',
+      OXIVOLT_ENV: 'staging',
+      DATABASE_URL: V2_URL,
+      OXIVOLT_DB_ALLOWED_HOSTS: 'postgres-staging-v2.railway.internal',
+      SHOPIFY_API_KEY: 'prodkey',
+    },
+    ['--migrate'],
+  );
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /OXIVOLT_FORBIDDEN_SHOPIFY_API_KEYS is empty/);
+  assert.doesNotMatch(r.stdout + r.stderr, /running `prisma migrate deploy`/);
 });
 
 // --- preflight script end-to-end (no database is reachable at these hosts) ---
