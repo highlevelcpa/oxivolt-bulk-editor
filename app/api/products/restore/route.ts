@@ -212,7 +212,11 @@ export async function POST(req: NextRequest) {
         description: merged.seo.description ?? '',
       };
     }
-    if ('handle' in merged && merged.handle) productInput.handle = merged.handle;
+    if ('handle' in merged && merged.handle) {
+      productInput.handle = merged.handle;
+      // The AI handle may already be indexed/shared: redirect it to the restored URL.
+      productInput.redirectNewHandle = true;
+    }
     if ('category' in merged) productInput.category = merged.category ?? null;
 
     if (Object.keys(productInput).length > 1) {
