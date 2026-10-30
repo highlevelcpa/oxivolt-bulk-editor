@@ -9,6 +9,21 @@ SHOPIFY_SCOPES=read_products,write_products,read_inventory,write_inventory,read_
 # Postgres plugin and reference it — otherwise paste your DB URL here)
 DATABASE_URL=<your_postgresql_connection_string>
 
+# ===== Environment safety guard (see docs/database-migrations.md) =====
+# Leave ALL of these unset in PRODUCTION (production behaviour is unchanged).
+# Non-production (STAGING / local dev / CI):
+#   OXIVOLT_ENV                 staging | development | test  (must agree with RAILWAY_ENVIRONMENT_NAME)
+#   OXIVOLT_DB_ALLOWED_HOSTS    comma list of permitted DATABASE_URL hosts, e.g.
+#                               postgres-staging-v2.railway.internal
+#                               (loopback hosts are implicitly allowed off Railway;
+#                                postgres.railway.internal and *.proxy.rlwy.net are always refused)
+#   OXIVOLT_FORBIDDEN_SHOPIFY_API_KEYS  comma list — set to the PRODUCTION app client id in STAGING
+#   OXIVOLT_RUN_MIGRATIONS      true -> run `prisma migrate deploy` at container start (non-production only)
+# OXIVOLT_ENV=staging
+# OXIVOLT_DB_ALLOWED_HOSTS=postgres-staging-v2.railway.internal
+# OXIVOLT_FORBIDDEN_SHOPIFY_API_KEYS=<production_shopify_client_id>
+# OXIVOLT_RUN_MIGRATIONS=true
+
 # Google Gemini API key (powers the AI editing features) — FREE tier
 # Get one at https://aistudio.google.com/apikey
 #

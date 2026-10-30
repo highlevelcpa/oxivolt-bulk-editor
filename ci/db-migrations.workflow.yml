@@ -1,0 +1,50 @@
+# INACTIVE COPY. The GitHub App used to open this PR has no `workflows` permission,
+# so it cannot write under .github/workflows/. To enable this CI check, move this file to
+# .github/workflows/db-migrations.yml (e.g. via the GitHub web UI) in this PR.
+
+name: DB migrations
+
+# Verifies prisma/migrations and prisma/schema.prisma stay consistent, using
+# ONLY disposable Postgres containers created inside the CI job. No secrets,
+# no Railway access, no connection to any real database.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  migrations:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: ci
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: oxivolt_ci
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U ci -d oxivolt_ci"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      OXIVOLT_ENV: test
+      OXIVOLT_DISPOSABLE_DB: '1'
+      DATABASE_URL: postgresql://ci:ci@localhost:5432/oxivolt_ci
+      SHADOW_DATABASE_URL: postgresql://ci:ci@localhost:5432/oxivolt_ci_shadow
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: corepack enable
+      - run: yarn install --immutable
+      - name: Create shadow database
+        run: PGPASSWORD=ci psql -h localhost -U ci -d oxivolt_ci -c 'CREATE DATABASE oxivolt_ci_shadow'
+      - name: Guard + migration unit tests
+        run: node --import tsx --test tests/env-guard.test.ts tests/migrations.test.ts
+      - name: Migration / schema consistency
+        run: bash scripts/check-migrations.sh

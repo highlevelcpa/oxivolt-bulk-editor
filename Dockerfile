@@ -37,5 +37,8 @@ COPY --from=builder /app ./
 EXPOSE 3000
 ENV PORT=3000
 
-# Push the schema to the database (safe, additive) then start the server
-CMD ["sh", "-c", "yarn prisma db push --skip-generate && yarn start -p ${PORT:-3000}"]
+# No schema changes at startup by default (`prisma db push` removed).
+# scripts/preflight.ts: production -> no-op; non-production -> DB/Shopify
+# environment guard, then `prisma migrate deploy` only if OXIVOLT_RUN_MIGRATIONS=true.
+# See docs/database-migrations.md.
+CMD ["sh", "-c", "node --import tsx scripts/preflight.ts && yarn start -p ${PORT:-3000}"]
