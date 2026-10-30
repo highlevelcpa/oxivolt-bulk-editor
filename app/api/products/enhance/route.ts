@@ -36,6 +36,16 @@ const PRODUCT_UPDATE = `
   }
 `;
 
+// Changing a product handle changes its storefront URL. Ask Shopify to create
+// a URL redirect from the old handle (ProductUpdateInput.redirectNewHandle),
+// like the admin's "Create a URL redirect" checkbox, so indexed/shared links
+// don't 404. Only when the handle actually changes.
+function setHandleWithRedirect(productInput: any, newHandle: string | null | undefined, currentHandle: string | null | undefined) {
+  if (!newHandle) return;
+  productInput.handle = newHandle;
+  if (newHandle !== currentHandle) productInput.redirectNewHandle = true;
+}
+
 export async function POST(req: NextRequest) {
   try {
     const token = getBearerToken(req);
@@ -133,7 +143,7 @@ export async function POST(req: NextRequest) {
           if (content.descriptionHtml) productInput.descriptionHtml = content.descriptionHtml;
           if (content.seo) {
             productInput.seo = { title: content.seo.title, description: content.seo.description };
-            if (content.seo.handle) productInput.handle = content.seo.handle;
+            setHandleWithRedirect(productInput, content.seo.handle, n?.handle);
           }
           if (added.length > 0) productInput.tags = [...existing, ...added];
           changes = {
@@ -165,7 +175,7 @@ export async function POST(req: NextRequest) {
             return { id: n.id, title: n.title, success: false, error: 'Could not generate SEO' };
           }
           productInput.seo = { title: seo.title, description: seo.description };
-          if (seo.handle) productInput.handle = seo.handle;
+          setHandleWithRedirect(productInput, seo.handle, n?.handle);
           changes = { seoTitle: seo.title, seoDescription: seo.description, urlHandle: seo.handle || '(unchanged)' };
           previous = {
             seo: { title: n?.seo?.title ?? null, description: n?.seo?.description ?? null },

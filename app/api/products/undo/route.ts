@@ -141,7 +141,10 @@ export async function POST(req: NextRequest) {
         description: previous.seo.description ?? '',
       };
     }
-    if ('handle' in previous && previous.handle) productInput.handle = previous.handle;
+    if ('handle' in previous && previous.handle) {
+      productInput.handle = previous.handle;
+      productInput.redirectNewHandle = true; // same as /restore
+    }
     if ('category' in previous) productInput.category = previous.category ?? null;
 
     if (Object.keys(productInput).length > 1) {
