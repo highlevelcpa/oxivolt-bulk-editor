@@ -46,12 +46,17 @@ function isQuotaOrTransient(status: number): boolean {
 export const GEMINI_PRIMARY = 'gemini-3.6-flash';
 export const GEMINI_FALLBACK = 'gemini-3.5-flash-lite';
 
+// Upper bounds so a hung upstream cannot keep a request (and its billing/usage
+// accounting) pending forever. A timeout is handled like any other fetch error.
+export const IMAGE_FETCH_TIMEOUT_MS = 10_000;
+export const AI_REQUEST_TIMEOUT_MS = 45_000;
+
 type InlineImage = { mime_type: string; data: string };
 
 async function fetchImageInline(url?: string | null): Promise<InlineImage | null> {
   if (!url) return null;
   try {
-    const resp = await fetch(url);
+    const resp = await fetch(url, { signal: AbortSignal.timeout(IMAGE_FETCH_TIMEOUT_MS) });
     if (!resp.ok) return null;
     const ct = (resp.headers.get('content-type') || '').split(';')[0].trim();
     const mime = ct.startsWith('image/') ? ct : 'image/jpeg';
@@ -107,6 +112,7 @@ export async function geminiGenerate(
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body,
+        signal: AbortSignal.timeout(AI_REQUEST_TIMEOUT_MS),
       });
     } catch (e: any) {
       console.error(`[${logPrefix}] fetch error key#${i + 1} model=${model} image=${!!inline}:`, e?.message ?? e);
