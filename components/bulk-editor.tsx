@@ -12,6 +12,7 @@ import { Card } from '@/components/ui/card';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Badge } from '@/components/ui/badge';
 import { Progress } from '@/components/ui/progress';
+import { buildCsv } from '@/lib/csv';
 import {
   Select,
   SelectContent,
@@ -847,27 +848,20 @@ export default function BulkEditor({ shop, host }: { shop: string; host: string 
       toast.error('No products to export.');
       return;
     }
-    const esc = (v: any) => {
-      const s = (v ?? '').toString();
-      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-    };
     const header = ['Title', 'Vendor', 'Type', 'Category', 'Status', 'Tags', 'Price', 'Inventory'];
-    const lines = [header.join(',')];
-    for (const p of rows) {
-      lines.push(
-        [
-          esc(p?.title),
-          esc(p?.vendor),
-          esc(p?.productType),
-          esc(p?.category ?? ''),
-          esc(p?.status),
-          esc(Array.isArray(p?.tags) ? p.tags.join('; ') : ''),
-          esc(money(p?.price)),
-          esc(p?.inventoryQuantity ?? 0),
-        ].join(','),
-      );
-    }
-    const csv = lines.join('\n');
+    const csv = buildCsv(
+      header,
+      rows.map((p) => [
+        p?.title,
+        p?.vendor,
+        p?.productType,
+        p?.category ?? '',
+        p?.status,
+        Array.isArray(p?.tags) ? p.tags.join('; ') : '',
+        money(p?.price),
+        p?.inventoryQuantity ?? 0,
+      ]),
+    );
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
