@@ -7,14 +7,19 @@
 //   - report success for `price: ""`, `vendor: ""`, or a price without a variant id
 //     (the field was silently skipped, nothing was written, result said success).
 //
-// Each update item is validated independently BEFORE any Shopify call. An invalid item
-// is reported as a failed result and never reaches a Shopify mutation; valid items in
-// the same request proceed as before. A request with no valid item gets a 400 and the
-// route makes no Shopify call at all.
+// Each update item is validated BEFORE any Shopify call. An invalid item never reaches
+// a Shopify mutation.
 //
 // Field semantics (unchanged from the route): a field that is omitted, `undefined` or
 // `null` is "not requested". A field that is present with any other value is
 // "requested" and must be valid.
+//
+// Phase 2 hardening: unknown item fields and unknown top-level fields are rejected (not
+// silently dropped), duplicate products in one request are rejected, Undo snapshot
+// fields are bounded, and a request is all-or-nothing: if ANY item is invalid the whole
+// request is rejected with every item's error and no Shopify call is made. A preview
+// token (lib/preview-token.ts) is only issued for an all-valid request, so a partially
+// valid request could never be applied anyway.
 //
 // Pure module (no Next.js / Prisma imports) so it can be unit-tested directly.
 
@@ -22,6 +27,27 @@ export const MAX_UPDATES_PER_REQUEST = 50;
 const MAX_TEXT = 255; // Shopify limit for vendor, product type and each tag
 const MAX_TAGS = 250; // Shopify limit for tags per product
 const MAX_QUANTITY = 1_000_000_000; // Shopify inventory quantity bound
+const MAX_TITLE = 1024; // title is only stored in the EditLog for display; generous bound
+
+// Every field the bulk editor may send. Anything else is rejected, not silently dropped.
+const ITEM_KEYS = new Set([
+  'productId',
+  'title',
+  'variantId',
+  'inventoryItemId',
+  'vendor',
+  'price',
+  'quantity',
+  'status',
+  'productType',
+  'tags',
+  'prevVendor',
+  'prevPrice',
+  'prevQuantity',
+  'prevStatus',
+  'prevProductType',
+  'prevTags',
+]);
 
 // Non-negative decimal, at most 3 fraction digits (3-decimal currencies), no exponent,
 // sign, currency symbol or thousands separator.
@@ -115,7 +141,15 @@ export function validateUpdateItem(raw: unknown): ItemValidation {
   if (!productId) return { ok: false, productId: '', error: 'Missing product id' };
   const fail = (error: string): ItemValidation => ({ ok: false, productId, error });
   if (!PRODUCT_GID.test(productId)) return fail('Invalid product id');
+  const unknown = Object.keys(u).filter((k) => !ITEM_KEYS.has(k));
+  if (unknown.length > 0) return fail(`Unsupported field(s): ${unknown.slice(0, 5).map((k) => show(k)).join(', ')}`);
   if (!optionalText(u.title)) return fail('title: must be text');
+  if (typeof u.title === 'string' && u.title.length > MAX_TITLE) {
+    return fail(`title: must be at most ${MAX_TITLE} characters`);
+  }
+  for (const k of ['variantId', 'inventoryItemId'] as const) {
+    if (requested(u[k]) && typeof u[k] !== 'string') return fail(`${k}: must be text`);
+  }
 
   const item: UpdateItem = {
     productId,
@@ -187,31 +221,63 @@ export function validateUpdateItem(raw: unknown): ItemValidation {
     if (pp === null) return fail(`prevPrice: invalid price ${show(u.prevPrice)}`);
     item.prevPrice = pp;
   } else if (u.prevPrice !== undefined) item.prevPrice = u.prevPrice;
+  // Empty strings are allowed here: a product may legitimately have no vendor/type.
   for (const k of ['prevVendor', 'prevStatus', 'prevProductType'] as const) {
     if (!optionalText(u[k])) return fail(`${k}: must be text`);
+    if (typeof u[k] === 'string' && u[k].length > MAX_TEXT) {
+      return fail(`${k}: must be at most ${MAX_TEXT} characters`);
+    }
     if (u[k] !== undefined) item[k] = u[k];
   }
   if (requested(u.prevTags)) {
-    if (!Array.isArray(u.prevTags) || !u.prevTags.every((t: unknown) => typeof t === 'string')) {
+    if (
+      !Array.isArray(u.prevTags) ||
+      u.prevTags.length > MAX_TAGS ||
+      !u.prevTags.every((t: unknown) => typeof t === 'string' && t.length <= MAX_TEXT)
+    ) {
       return fail('prevTags: must be a list of tags');
     }
     item.prevTags = u.prevTags;
   }
-  if (u.prevQuantity !== undefined) item.prevQuantity = u.prevQuantity;
+  // Informational only (the server reads real stock for the CAS guard and Undo), but it
+  // must still be a sane integer. Negative is allowed: stock can be oversold below 0.
+  if (requested(u.prevQuantity)) {
+    const pq = u.prevQuantity;
+    if (typeof pq !== 'number' || !Number.isSafeInteger(pq) || Math.abs(pq) > MAX_QUANTITY) {
+      return fail('prevQuantity: must be a whole number');
+    }
+    item.prevQuantity = pq;
+  } else if (u.prevQuantity !== undefined) item.prevQuantity = u.prevQuantity;
 
   return { ok: true, item };
 }
 
 export type RequestValidation =
-  | { ok: true; results: ItemValidation[]; validCount: number }
+  | { ok: true; items: UpdateItem[]; updates: unknown[] }
   | { ok: false; status: 400; body: Record<string, any> };
 
-/** Validates the whole request body. A 400 result means: make no Shopify call at all. */
-export function validateUpdateRequest(body: unknown): RequestValidation {
-  const updates = (body as any)?.updates;
-  if (!Array.isArray(updates) || updates.length === 0) {
-    return { ok: false, status: 400, body: { error: 'No updates provided' } };
+/**
+ * Validates the whole request body. All-or-nothing: a 400 result means make no Shopify
+ * call at all. `allowedKeys` lists the accepted top-level fields (default: `updates`).
+ * On success `updates` is the raw submitted array (used for the preview-token hash) and
+ * `items` the normalized items, in request order.
+ */
+export function validateUpdateRequest(
+  body: unknown,
+  allowedKeys: readonly string[] = ['updates'],
+): RequestValidation {
+  const bad = (error: string, code?: string): RequestValidation => ({
+    ok: false,
+    status: 400,
+    body: code ? { error, code } : { error },
+  });
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return bad('No updates provided');
+  const unknownTop = Object.keys(body).filter((k) => !allowedKeys.includes(k));
+  if (unknownTop.length > 0) {
+    return bad(`Unsupported request field(s): ${unknownTop.slice(0, 5).map((k) => show(k)).join(', ')}`, 'unsupported_field');
   }
+  const updates = (body as any).updates;
+  if (!Array.isArray(updates) || updates.length === 0) return bad('No updates provided');
   if (updates.length > MAX_UPDATES_PER_REQUEST) {
     return {
       ok: false,
@@ -220,15 +286,25 @@ export function validateUpdateRequest(body: unknown): RequestValidation {
     };
   }
   const results = updates.map(validateUpdateItem);
-  const validCount = results.filter((r) => r.ok).length;
-  if (validCount === 0) {
-    const first = results.find((r): r is Extract<ItemValidation, { ok: false }> => !r.ok);
+  // The same product twice in one request would be written twice and logged twice
+  // (and the second Undo snapshot would capture the first write), so reject it.
+  const seen = new Set<string>();
+  for (let i = 0; i < results.length; i++) {
+    const r = results[i];
+    if (!r.ok) continue;
+    if (seen.has(r.item.productId)) {
+      results[i] = { ok: false, productId: r.item.productId, error: 'Duplicate product in this request' };
+    } else seen.add(r.item.productId);
+  }
+  const invalid = results.filter((r): r is Extract<ItemValidation, { ok: false }> => !r.ok);
+  if (invalid.length > 0) {
+    const allInvalid = invalid.length === results.length;
     return {
       ok: false,
       status: 400,
       body: {
-        error: `No valid updates; nothing was changed. ${first?.error ?? ''}`.trim(),
-        code: 'no_valid_updates',
+        error: `${allInvalid ? 'No valid updates' : `${invalid.length} of ${results.length} updates are invalid`}; nothing was changed. ${invalid[0].error}`,
+        code: allInvalid ? 'no_valid_updates' : 'invalid_updates',
         results: results.map((r) => ({
           productId: r.ok ? r.item.productId : r.productId,
           success: false,
@@ -237,5 +313,39 @@ export function validateUpdateRequest(body: unknown): RequestValidation {
       },
     };
   }
-  return { ok: true, results, validCount };
+  return { ok: true, items: results.map((r) => (r as Extract<ItemValidation, { ok: true }>).item), updates };
+}
+
+// ---------------------------------------------------------------------------
+// Undo (POST /api/products/undo) and Restore (POST /api/products/restore) bodies.
+// ---------------------------------------------------------------------------
+const EDIT_LOG_ID_RE = /^[A-Za-z0-9_-]{1,64}$/; // Prisma cuid()
+
+export type RevertBody =
+  | { ok: true; id: string; acceptCurrentQuantity: number | null }
+  | { ok: false; error: string };
+
+/**
+ * `kind: 'undo'` expects `{ editLogId, acceptCurrentQuantity? }`, `kind: 'restore'`
+ * expects `{ productId, acceptCurrentQuantity? }`. `acceptCurrentQuantity` is the stock
+ * value the merchant confirmed overwriting; it may be negative (oversold stock) but must
+ * be a whole number. Anything else is rejected instead of being ignored.
+ */
+export function validateRevertBody(body: unknown, kind: 'undo' | 'restore'): RevertBody {
+  const idKey = kind === 'undo' ? 'editLogId' : 'productId';
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return { ok: false, error: `Missing ${idKey}` };
+  const b = body as Record<string, unknown>;
+  const unknown = Object.keys(b).filter((k) => k !== idKey && k !== 'acceptCurrentQuantity');
+  if (unknown.length > 0) {
+    return { ok: false, error: `Unsupported request field(s): ${unknown.slice(0, 5).map((k) => show(k)).join(', ')}` };
+  }
+  const id = b[idKey];
+  if (typeof id !== 'string' || !id) return { ok: false, error: `Missing ${idKey}` };
+  if (kind === 'undo' ? !EDIT_LOG_ID_RE.test(id) : !PRODUCT_GID.test(id)) return { ok: false, error: `Invalid ${idKey}` };
+  const acq = b.acceptCurrentQuantity;
+  if (acq === undefined || acq === null) return { ok: true, id, acceptCurrentQuantity: null };
+  if (typeof acq !== 'number' || !Number.isSafeInteger(acq) || Math.abs(acq) > MAX_QUANTITY) {
+    return { ok: false, error: 'acceptCurrentQuantity: must be a whole number' };
+  }
+  return { ok: true, id, acceptCurrentQuantity: acq };
 }

@@ -1,6 +1,6 @@
 import { randomUUID } from 'crypto';
 import { NextRequest, NextResponse } from 'next/server';
-import { getBearerToken, verifySessionToken, shopifyGraphQL } from '@/lib/shopify';
+import { getBearerToken, verifySessionToken, shopifyGraphQL, publicShopifyError } from '@/lib/shopify';
 import { getWorkingAccessToken, ReauthRequiredError } from '@/lib/access-token';
 import { limitExceededResponse, requireActivePlan } from '@/lib/billing-guard';
 import { prisma } from '@/lib/db';
@@ -13,6 +13,7 @@ import {
 } from '@/lib/inventory';
 import { incrementUsage } from '@/lib/usage';
 import { validateUpdateRequest } from '@/lib/update-validate';
+import { verifyPreviewToken } from '@/lib/preview-token';
 
 export const dynamic = 'force-dynamic';
 
@@ -73,14 +74,20 @@ export async function POST(req: NextRequest) {
     }
 
     // Validate every item BEFORE any Shopify call (including the token probe and billing
-    // gate). A request with no valid item is rejected here with zero Shopify calls.
-    const body = await req.json().catch(() => ({}));
-    const validation = validateUpdateRequest(body);
+    // gate). All-or-nothing: any invalid item rejects the request with zero Shopify calls.
+    const body = await req.json().catch(() => null);
+    const validation = validateUpdateRequest(body, ['updates', 'previewToken']);
     if (!validation.ok) {
       return NextResponse.json(validation.body, { status: validation.status });
     }
-    const checked = validation.results;
-    const updates = checked.flatMap((r) => (r.ok ? [r.item] : []));
+
+    // Apply only what was previewed: the token must be for this shop, unexpired, and
+    // match the exact submitted `updates` array (see lib/preview-token.ts).
+    const preview = verifyPreviewToken((body as any).previewToken, shop, validation.updates);
+    if (!preview.ok) {
+      return NextResponse.json({ error: preview.error, code: preview.code }, { status: preview.status });
+    }
+    const updates = validation.items;
 
     let accessToken: string;
     try {
@@ -115,13 +122,7 @@ export async function POST(req: NextRequest) {
     const results: any[] = [];
 
     // Iterate in request order so results[i] still corresponds to updates[i].
-    for (const v of checked) {
-      if (!v.ok) {
-        // Rejected by validation: never sent to Shopify, nothing to log or undo.
-        results.push({ productId: v.productId, success: false, error: v.error });
-        continue;
-      }
-      const u = v.item;
+    for (const u of updates) {
       const productId = u.productId;
       const changeSummary: Record<string, any> = {};
       const previous: Record<string, any> = {};
@@ -161,7 +162,7 @@ export async function POST(req: NextRequest) {
             if ('tags' in productChanges) previous.tags = Array.isArray(u?.prevTags) ? u.prevTags : [];
           }
         } catch (e: any) {
-          errorParts.push(`fields: ${e?.message ?? 'error'}`);
+          errorParts.push(`fields: ${publicShopifyError(e)}`);
         }
       }
 
@@ -180,15 +181,14 @@ export async function POST(req: NextRequest) {
             previous.variantId = u?.variantId ?? null;
           }
         } catch (e: any) {
-          errorParts.push(`price: ${e?.message ?? 'error'}`);
+          errorParts.push(`price: ${publicShopifyError(e)}`);
         }
       }
 
       // 3) Quantity / inventory
+      // (quantity and inventoryItemId were already validated in lib/update-validate.ts)
       const wantsQuantity = u?.quantity !== null && u?.quantity !== undefined;
-      if (wantsQuantity && !Number.isInteger(Number(u.quantity))) {
-        errorParts.push('quantity: invalid quantity (must be a whole number)');
-      } else if (wantsQuantity && !u?.inventoryItemId) {
+      if (wantsQuantity && !u?.inventoryItemId) {
         errorParts.push('quantity: missing inventory item id for this product');
       } else if (wantsQuantity && !locationId) {
         errorParts.push('quantity: no active store location found');
@@ -233,7 +233,7 @@ export async function POST(req: NextRequest) {
             }
           }
         } catch (e: any) {
-          errorParts.push(`quantity: ${e?.message ?? 'error'}`);
+          errorParts.push(`quantity: ${publicShopifyError(e)}`);
         }
       }
 
@@ -261,6 +261,8 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({ results });
   } catch (e: any) {
-    return NextResponse.json({ error: e?.message ?? 'Update failed' }, { status: 500 });
+    // Never echo internal error text (DB/driver messages, Shopify response bodies).
+    console.error('[products/update] failed:', e?.name ?? 'Error');
+    return NextResponse.json({ error: 'Update failed' }, { status: 500 });
   }
 }

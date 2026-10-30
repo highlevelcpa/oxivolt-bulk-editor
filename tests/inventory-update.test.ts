@@ -196,6 +196,7 @@ let updatePOST: (req: any) => Promise<Response>;
 let undoPOST: (req: any) => Promise<Response>;
 let restorePOST: (req: any) => Promise<Response>;
 let NextRequestCtor: any;
+let signPreview: (shop: string, updates: unknown) => { token: string };
 
 before(async () => {
   (globalThis as any).fetch = fetchMock;
@@ -203,6 +204,7 @@ before(async () => {
   updatePOST = (await import('../app/api/products/update/route')).POST;
   undoPOST = (await import('../app/api/products/undo/route')).POST;
   restorePOST = (await import('../app/api/products/restore/route')).POST;
+  signPreview = (await import('../lib/preview-token')).signPreviewToken;
 });
 
 beforeEach(() => {
@@ -228,8 +230,12 @@ function request(path: string, body: any) {
   });
 }
 
+// Apply requires a server-issued preview token for the exact `updates` (lib/preview-token.ts).
+// These flow tests sign one directly; tests/bulk-edit-safety.test.ts covers the
+// preview endpoint and every rejection path of the token check.
 async function postUpdate(updates: any[]) {
-  const res = await updatePOST(request('/api/products/update', { updates }));
+  const previewToken = signPreview(SHOP, updates).token;
+  const res = await updatePOST(request('/api/products/update', { updates, previewToken }));
   const text = await res.text();
   return { status: res.status, text, json: JSON.parse(text) };
 }
@@ -395,8 +401,10 @@ test('network failure and HTTP 5xx are reported per product without leaking the 
   };
   const { json, text } = await postUpdate([product(1, { quantity: 10 }), product(2, { quantity: 10 })]);
   assert.deepEqual(json.results.map((r: any) => r.success), [false, false]);
-  assert.equal(json.results[0].error, 'quantity: fetch failed');
-  assert.match(json.results[1].error, /quantity: Shopify API error 500/);
+  assert.equal(json.results[0].error, 'quantity: network error contacting Shopify');
+  // HTTP status only; the raw Shopify response body is not echoed to the browser.
+  assert.equal(json.results[1].error, 'quantity: Shopify API error 500');
+  assert.ok(!text.includes('Internal Server Error'));
   assert.ok(!text.includes(ACCESS_TOKEN));
   assert.ok(!JSON.stringify(editLogs).includes(ACCESS_TOKEN));
   assert.deepEqual(usageIncrements, []);
@@ -423,12 +431,15 @@ for (const bad of ['abc', 1.5, '12.7', {}]) {
   });
 }
 
-test('missing inventory item id fails that product only', async () => {
-  const { json } = await postUpdate([product(1, { quantity: 3, inventoryItemId: null }), product(2, { quantity: 3 })]);
+test('missing inventory item id rejects the whole request (all-or-nothing), nothing is written', async () => {
+  const { status, json } = await postUpdate([product(1, { quantity: 3, inventoryItemId: null }), product(2, { quantity: 3 })]);
+  assert.equal(status, 400);
+  assert.equal(json.code, 'invalid_updates');
   assert.equal(json.results[0].success, false);
   assert.equal(json.results[0].error, 'quantity: missing inventory item id for this product');
-  assert.equal(json.results[1].success, true);
-  assert.equal(callsOf('invSet').length, 1);
+  assert.equal(json.results[1].success, false);
+  assert.equal(json.results[1].error, null);
+  assert.equal(calls.length, 0);
 });
 
 test('missing product id and empty update list are rejected', async () => {
@@ -884,19 +895,21 @@ for (const [label, extra] of INVALID_ITEMS) {
     assert.deepEqual(usageIncrements, []);
   });
 
-  test(`validation: ${label} next to a valid item → only the valid item is written`, async () => {
-    forbidWrites((_op, vars) => !JSON.stringify(vars).match(/\/(Product|ProductVariant|InventoryItem)\/1"/));
+  test(`validation: ${label} next to a valid item → whole request rejected, nothing written`, async () => {
+    forbidWrites();
     const { status, json } = await postUpdate([product(1, extra), product(2, { quantity: 4, price: '9.99', vendor: 'ACME' })]);
-    assert.equal(status, 200);
+    assert.equal(status, 400);
+    assert.equal(json.code, 'invalid_updates');
     assert.equal(json.results[0].success, false);
     assert.equal(json.results[0].productId, 'gid://shopify/Product/1');
-    assert.equal(json.results[1].success, true);
-    assert.deepEqual(json.results[1].changes, { vendor: 'ACME', price: '9.99', quantity: 4 });
+    assert.ok(json.results[0].error);
+    assert.equal(json.results[1].success, false);
+    assert.equal(json.results[1].error, null, 'the valid item is not blamed, just not applied');
     assert.deepEqual(writeViolations, []);
-    assert.equal(writesFor(1).length, 0);
-    // The rejected item is not logged (nothing was attempted) and not counted.
-    assert.deepEqual(editLogs.map((l) => l.productId), ['gid://shopify/Product/2']);
-    assert.deepEqual(usageIncrements, [1]);
+    assert.equal(writesFor(2).length, 0);
+    assert.equal(calls.length, 0);
+    assert.deepEqual(editLogs, []);
+    assert.deepEqual(usageIncrements, []);
   });
 }
 

@@ -114,15 +114,16 @@ test('Undo snapshot fields must be well-formed', () => {
   assert.deepEqual(ok({ tags: ['a'], prevTags: ['b'] }).prevTags, ['b']);
 });
 
-test('validateUpdateRequest: empty, oversize, all-invalid, mixed', () => {
-  for (const body of [undefined, null, {}, { updates: [] }, { updates: 'x' }]) {
+test('validateUpdateRequest: empty, oversize, all-invalid, mixed (all-or-nothing)', () => {
+  for (const body of [undefined, null, {}, [], 'x', { updates: [] }, { updates: 'x' }]) {
     const r = validateUpdateRequest(body);
     assert.ok(!r.ok && r.status === 400 && r.body.error === 'No updates provided');
   }
-  const big = validateUpdateRequest({ updates: Array.from({ length: MAX_UPDATES_PER_REQUEST + 1 }, () => ({ ...base, vendor: 'A' })) });
+  const uniq = (n: number) => Array.from({ length: n }, (_, i) => ({ ...base, productId: `gid://shopify/Product/${i + 1}`, vendor: 'A' }));
+  const big = validateUpdateRequest({ updates: uniq(MAX_UPDATES_PER_REQUEST + 1) });
   assert.ok(!big.ok && big.body.code === 'too_many_updates');
-  const atLimit = validateUpdateRequest({ updates: Array.from({ length: MAX_UPDATES_PER_REQUEST }, () => ({ ...base, vendor: 'A' })) });
-  assert.ok(atLimit.ok && atLimit.validCount === MAX_UPDATES_PER_REQUEST);
+  const atLimit = validateUpdateRequest({ updates: uniq(MAX_UPDATES_PER_REQUEST) });
+  assert.ok(atLimit.ok && atLimit.items.length === MAX_UPDATES_PER_REQUEST);
 
   const none = validateUpdateRequest({ updates: [{ ...base, price: '' }, { ...base, quantity: -1 }] });
   assert.ok(!none.ok);
@@ -130,8 +131,47 @@ test('validateUpdateRequest: empty, oversize, all-invalid, mixed', () => {
   assert.match(none.body.error, /^No valid updates; nothing was changed\. price: invalid price/);
   assert.deepEqual(none.body.results.map((r: any) => r.success), [false, false]);
 
-  const mixed = validateUpdateRequest({ updates: [{ ...base, price: '' }, { ...base, vendor: 'A' }] });
-  assert.ok(mixed.ok);
-  assert.equal(mixed.validCount, 1);
-  assert.deepEqual(mixed.results.map((r) => r.ok), [false, true]);
+  // One invalid item rejects the whole request; the valid item is reported with error null.
+  const mixed = validateUpdateRequest({ updates: [{ ...base, price: '' }, { ...base, productId: 'gid://shopify/Product/2', vendor: 'A' }] });
+  assert.ok(!mixed.ok);
+  assert.equal(mixed.body.code, 'invalid_updates');
+  assert.match(mixed.body.error, /^1 of 2 updates are invalid; nothing was changed\. price: invalid price/);
+  assert.deepEqual(mixed.body.results.map((r: any) => r.error === null), [false, true]);
+});
+
+test('validateUpdateRequest: unknown top-level fields, duplicates, raw updates returned', () => {
+  const extra = validateUpdateRequest({ updates: [{ ...base, vendor: 'A' }], dryRun: false });
+  assert.ok(!extra.ok && extra.body.code === 'unsupported_field' && /dryRun/.test(extra.body.error));
+  const tokenNotAllowed = validateUpdateRequest({ updates: [{ ...base, vendor: 'A' }], previewToken: 'x' });
+  assert.ok(!tokenNotAllowed.ok && tokenNotAllowed.body.code === 'unsupported_field');
+  const tokenAllowed = validateUpdateRequest({ updates: [{ ...base, vendor: 'A' }], previewToken: 'x' }, ['updates', 'previewToken']);
+  assert.ok(tokenAllowed.ok);
+
+  const dup = validateUpdateRequest({ updates: [{ ...base, vendor: 'A' }, { ...base, price: '1.00' }] });
+  assert.ok(!dup.ok);
+  assert.equal(dup.body.results[1].error, 'Duplicate product in this request');
+
+  const raw = [{ ...base, vendor: '  A  ' }];
+  const r = validateUpdateRequest({ updates: raw });
+  assert.ok(r.ok);
+  assert.equal(r.updates, raw, 'raw array is returned untouched (preview hash input)');
+  assert.equal(r.items[0].vendor, 'A');
+});
+
+test('unknown item fields are rejected, not silently dropped', () => {
+  bad({ vendor: 'A', compareAtPrice: '9.99' }, /^Unsupported field\(s\): compareAtPrice$/);
+  bad({ vendor: 'A', operation: 'delete' }, /^Unsupported field/);
+  bad({ vendor: 'A', __proto__x: 1 }, /^Unsupported field/);
+  bad({ vendor: 'A', variantId: 5 }, /^variantId: must be text$/);
+  bad({ vendor: 'A', title: 'x'.repeat(1025) }, /^title: must be at most 1024/);
+});
+
+test('Undo snapshot bounds: prev text length, prevTags, prevQuantity', () => {
+  assert.equal(ok({ vendor: 'A', prevVendor: '' }).prevVendor, '');
+  bad({ vendor: 'A', prevVendor: 'x'.repeat(256) }, /^prevVendor: must be at most 255/);
+  bad({ tags: ['a'], prevTags: Array.from({ length: 251 }, () => 't') }, /^prevTags:/);
+  bad({ tags: ['a'], prevTags: ['x'.repeat(256)] }, /^prevTags:/);
+  assert.equal(ok({ quantity: 1, prevQuantity: -3 }).prevQuantity, -3);
+  assert.equal(ok({ quantity: 1, prevQuantity: null }).prevQuantity, null);
+  for (const pq of ['5', 1.5, NaN, {}, 2_000_000_000]) bad({ quantity: 1, prevQuantity: pq }, /^prevQuantity:/);
 });
