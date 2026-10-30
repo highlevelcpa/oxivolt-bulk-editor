@@ -400,7 +400,8 @@ export default function BulkEditor({ shop, host }: { shop: string; host: string 
   };
 
   // The fixed price is sent exactly as typed (trimmed): an empty or malformed value is
-  // rejected by the server instead of silently becoming $0.00.
+  // rejected by the server preview instead of silently becoming $0.00. The factor is
+  // checked here (> 0, no upper bound yet) because the server only sees the result.
   const factorError =
     applyPrice && priceMode === 'multiply' && !(FACTOR_RE.test(factor.trim()) && parseFloat(factor) > 0)
       ? 'Enter a price factor greater than 0 (e.g. 0.9), or untick Price.'
@@ -409,7 +410,10 @@ export default function BulkEditor({ shop, host }: { shop: string; host: string 
     (p: Product): string => {
       if (!applyPrice) return money(p?.price);
       if (priceMode === 'fixed') return fixedPrice.trim();
-      return money(parseFloat(p?.price ?? '0') * parseFloat(factor));
+      // A non-numeric base price must not silently become 0.00 (money() maps NaN to
+      // 0.00); send '' so the server rejects that product explicitly.
+      const n = parseFloat(p?.price ?? '') * parseFloat(factor);
+      return Number.isFinite(n) ? money(n) : '';
     },
     [applyPrice, priceMode, fixedPrice, factor],
   );
