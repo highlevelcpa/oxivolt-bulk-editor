@@ -1,0 +1,57 @@
+# Canonical location: .github/workflows/db-migrations.yml
+# (Kept under ci/ only because the bot that prepares PRs lacks GitHub's `workflows`
+#  permission; the file content is identical in both locations.)
+name: DB migrations
+
+# Verifies prisma/migrations and prisma/schema.prisma stay consistent using ONLY
+# a disposable PostgreSQL 18 service container created inside this job.
+# No repository secrets are referenced; no Railway access; no real database.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: db-migrations-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  migrations:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: ci
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: oxivolt_ci
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U ci -d oxivolt_ci"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      OXIVOLT_ENV: test
+      OXIVOLT_DISPOSABLE_DB: '1'
+      COREPACK_ENABLE_DOWNLOAD_PROMPT: '0'
+      DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/oxivolt_ci
+      SHADOW_DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/oxivolt_ci_shadow
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: corepack enable
+      - run: yarn install --immutable
+      - name: Create disposable shadow database
+        run: echo 'CREATE DATABASE oxivolt_ci_shadow;' | ./node_modules/.bin/prisma db execute --url "$DATABASE_URL" --stdin
+      - name: Unit tests (incl. environment guard + migration guards)
+        run: yarn test
+      - name: Migration / schema consistency
+        run: bash scripts/check-migrations.sh
