@@ -12,6 +12,7 @@ export function getAbacusKey(): string | null {
 const ABACUS_ENDPOINT = 'https://apps.abacus.ai/v1/chat/completions';
 // Router model — automatically picks a capable model behind the scenes.
 const ABACUS_MODEL = 'route-llm';
+const ABACUS_TIMEOUT_MS = 45_000;
 
 // Calls RouteLLM once and returns the raw text content (expected JSON), or null.
 // Text-only: product images are not inlined for this fallback path.
@@ -39,6 +40,8 @@ export async function abacusGenerate(
         max_tokens: maxTokens,
         response_format: { type: 'json_object' },
       }),
+      // Same bound as the Gemini path; a timeout is treated as a fetch error.
+      signal: AbortSignal.timeout(ABACUS_TIMEOUT_MS),
     });
   } catch (e: any) {
     console.error(`[${logPrefix}] abacus fetch error:`, e?.message ?? e);

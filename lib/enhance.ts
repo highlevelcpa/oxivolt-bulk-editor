@@ -2,6 +2,7 @@
 // Robust: logs failures, retries text-only, and falls back to a second model.
 
 import { geminiGenerate, getGeminiKey, GEMINI_PRIMARY, GEMINI_FALLBACK } from './gemini';
+import { sanitizeDescriptionHtml, isEffectivelyEmptyHtml } from './sanitize-html';
 
 export type ProductForEnhance = {
   id: string;
@@ -82,8 +83,13 @@ export async function generateDescription(p: ProductForEnhance): Promise<string 
     raw = await callLlmRaw(apiKey, GEMINI_FALLBACK, instructions, null, 900);
     parsed = parseJsonLoose(raw || '');
   }
-  const html = (parsed?.html || parsed?.description || '').toString().trim();
-  return html || null;
+  return cleanAiHtml(parsed?.html || parsed?.description);
+}
+
+// AI output is untrusted: keep only allowlisted formatting tags, no attributes.
+function cleanAiHtml(value: unknown): string | null {
+  const html = sanitizeDescriptionHtml((value ?? '').toString());
+  return html && !isEffectivelyEmptyHtml(html) ? html : null;
 }
 
 export async function generateTitle(p: ProductForEnhance): Promise<string | null> {
@@ -278,7 +284,7 @@ export async function generateAllContent(p: ProductForEnhance): Promise<AllConte
 
   const title =
     (parsed?.title || parsed?.name || '').toString().trim().replace(/^["']|["']$/g, '').slice(0, 120) || null;
-  const descriptionHtml = (parsed?.html || parsed?.description || '').toString().trim() || null;
+  const descriptionHtml = cleanAiHtml(parsed?.html || parsed?.description);
 
   const seoTitle = (parsed?.seoTitle || parsed?.seo_title || '').toString().trim().slice(0, 70);
   const seoDescription = (parsed?.seoDescription || parsed?.seo_description || '').toString().trim().slice(0, 320);

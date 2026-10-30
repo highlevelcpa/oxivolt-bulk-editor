@@ -5,8 +5,11 @@ import { limitExceededResponse, requireActivePlan } from '@/lib/billing-guard';
 import { generateDescription, generateSeo, generateTags, generateTitle, generateAllContent } from '@/lib/enhance';
 import { prisma } from '@/lib/db';
 import { incrementUsage } from '@/lib/usage';
+import { mapWithConcurrency } from '@/lib/concurrency';
 
 export const dynamic = 'force-dynamic';
+
+const AI_CONCURRENCY = 5;
 
 const NODES_QUERY = `
   query Nodes($ids: [ID!]!) {
@@ -229,7 +232,10 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    const settled = await Promise.all(nodes.map((n) => processNode(n)));
+    // Bounded fan-out: never fire more than AI_CONCURRENCY AI pipelines at once
+    // (each can make several Gemini calls), so large requests don't burst the
+    // AI rate limit. processNode never throws; it returns a per-product result.
+    const settled = await mapWithConcurrency(nodes, AI_CONCURRENCY, (n) => processNode(n));
     for (const r of settled) {
       if (r) results.push(r);
     }
